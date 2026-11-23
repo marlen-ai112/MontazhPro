@@ -5,6 +5,7 @@
       <NuxtPage />
     </main>
     <UIPrFooter/>
+    <UIPrAgentChat/>
   </div>
 </template>
 
