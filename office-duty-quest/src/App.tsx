@@ -39,7 +39,7 @@ function Shell() {
 
   return (
     <div className="min-h-screen pb-28 md:pb-10">
-      <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-ink-900/80 pt-[env(safe-area-inset-top)] backdrop-blur-xl">
+      <header className="sticky top-[env(safe-area-inset-top,0px)] z-30 border-b border-white/[0.06] bg-ink-900/80 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
           <button className="flex items-center gap-3" onClick={() => setTab('home')} aria-label="На главную">
             <Logo size={38} />

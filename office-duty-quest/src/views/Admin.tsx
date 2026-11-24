@@ -6,7 +6,7 @@ import { addDays, formatDayMonth, formatLong, startOfWeek, WEEKDAYS } from '../l
 import { employeeStats } from '../lib/game';
 import { assignmentsFor, assigneeFor } from '../lib/state';
 import { Avatar } from '../components/Avatar';
-import { ConfirmDialog } from '../components/Modal';
+import { ConfirmDialog, Modal } from '../components/Modal';
 import { PinModal } from '../components/PinModal';
 import { TaskPanel } from '../components/TaskPanel';
 
@@ -66,17 +66,8 @@ function AdminPanel() {
   const fileRef = useRef<HTMLInputElement>(null);
   const stats = employeeStats(state, today);
 
-  const doExport = () => {
-    try {
-      const blob = new Blob([exportData()], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `office-duty-quest-${today}.json`;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-      toast('success', 'Резервная копия скачана');
-    } catch { toast('error', 'Не удалось создать файл'); }
-  };
+  const [exportText, setExportText] = useState<string | null>(null);
+  const doExport = () => setExportText(exportData());
   const doImport = async (file?: File) => {
     if (!file) return;
     if (file.size > 5_000_000) { toast('error', 'Файл слишком большой'); return; }
@@ -205,7 +196,7 @@ function AdminPanel() {
             </form>
 
             <div className="mt-5 grid gap-2 border-t border-white/10 pt-4 sm:grid-cols-2">
-              <button className="btn-ghost" onClick={doExport}><Download size={16} /> Скачать копию</button>
+              <button className="btn-ghost" onClick={doExport}><Download size={16} /> Резервная копия</button>
               <button className="btn-ghost" onClick={() => fileRef.current?.click()}><Upload size={16} /> Восстановить</button>
               <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => void doImport(e.target.files?.[0])} />
               <button className="btn-ghost" onClick={() => setConfirm('demo')} data-testid="load-demo"><FlaskConical size={16} /> Демо-история</button>
@@ -215,6 +206,7 @@ function AdminPanel() {
         </div>
       </div>
 
+      {exportText !== null && <ExportDialog text={exportText} onClose={() => setExportText(null)} />}
       {confirm === 'clear' && (
         <ConfirmDialog title="Очистить всю историю?" danger confirmLabel="Да, удалить всё"
           text="Будут удалены все отметки, XP и достижения всех сотрудников, а также журнал действий. Это нельзя отменить — сначала можно скачать резервную копию."
@@ -226,5 +218,33 @@ function AdminPanel() {
           onCancel={() => setConfirm(null)} onConfirm={() => { loadDemo(); setConfirm(null); }} />
       )}
     </div>
+  );
+}
+
+function ExportDialog({ text, onClose }: { text: string; onClose: () => void }) {
+  const { toast, today } = useApp();
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); toast('success', 'Копия скопирована в буфер'); return; } catch { /* запасной вариант */ }
+    ref.current?.select();
+    toast('info', 'Текст выделен — скопируйте его вручную');
+  };
+  const save = () => {
+    try {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      a.download = `office-duty-quest-${today}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch { /* в некоторых средах скачивание закрыто */ }
+  };
+  return (
+    <Modal title="Резервная копия данных" onClose={onClose} wide>
+      <p className="mb-3 text-sm text-slate-400">Скопируйте текст и сохраните в файл <code>.json</code>. Восстановить данные можно кнопкой «Восстановить» (файл).</p>
+      <textarea ref={ref} readOnly value={text} className="input h-56 font-mono text-xs" aria-label="Данные резервной копии" onFocus={(e) => e.currentTarget.select()} />
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
+        <button className="btn-ghost" onClick={save}><Download size={16} /> Скачать файл</button>
+        <button className="btn-primary" onClick={() => void copy()}>Копировать</button>
+      </div>
+    </Modal>
   );
 }

@@ -91,7 +91,7 @@ export function useApp(): Ctx {
 }
 
 const tabFromHash = (): Tab => {
-  const h = window.location.hash.replace('#/', '').replace('#', '') as Tab;
+  const h = window.location.hash.replace('#', '') as Tab;
   return TABS.includes(h) ? h : 'home';
 };
 
@@ -182,6 +182,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       let fromCloudFailed = false;
       try {
         loaded = await repo.load();
+        if (repo instanceof LocalRepository && repo.degraded) {
+          window.setTimeout(() => toast('error', 'Хранилище браузера недоступно', 'Данные будут жить только до закрытия страницы'), 2000);
+        }
         if (repo instanceof LocalRepository && repo.recovered) {
           window.setTimeout(() => toast('error', 'Сохранённые данные были повреждены', 'Создана резервная копия, загружены демо-данные'), 2000);
         }
@@ -236,14 +239,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // ── навигация ──
   const setTab = useCallback((t: Tab) => {
     setTabState(t);
-    try { window.history.pushState(null, '', `#/${t}`); } catch { /* ignore */ }
+    try { window.location.hash = t; } catch { /* ignore */ }
     window.scrollTo({ top: 0 });
   }, []);
   useEffect(() => {
     const on = () => setTabState(tabFromHash());
     window.addEventListener('hashchange', on);
-    window.addEventListener('popstate', on);
-    return () => { window.removeEventListener('hashchange', on); window.removeEventListener('popstate', on); };
+    return () => { window.removeEventListener('hashchange', on); };
   }, []);
   const openTasks = useCallback((d: ISODate) => { setSelectedDate(d); setTab('tasks'); }, [setTab]);
 

@@ -9,6 +9,9 @@ export class LocalRepository implements Repository {
   readonly kind = 'local' as const;
   /** Если прошлые данные были повреждены — сюда попадает пояснение для уведомления */
   recovered = false;
+  /** Хранилище браузера недоступно — данные держим в памяти до закрытия страницы */
+  degraded = false;
+  private memory: string | null = null;
 
   constructor(private key: string = KEY) {}
 
@@ -17,7 +20,8 @@ export class LocalRepository implements Repository {
     try {
       raw = localStorage.getItem(this.key);
     } catch {
-      throw new Error('Браузер запретил доступ к localStorage (приватный режим?). Данные не будут сохраняться.');
+      this.degraded = true;
+      return null;
     }
     if (!raw) return null;
     try {
@@ -32,7 +36,11 @@ export class LocalRepository implements Repository {
     }
   }
 
+  /** Копия данных в памяти (только в деградированном режиме) */
+  get memoryCopy() { return this.memory; }
+
   async save(_prev: AppState | null, next: AppState): Promise<void> {
+    if (this.degraded) { this.memory = JSON.stringify(next); return; }
     try {
       localStorage.setItem(this.key, JSON.stringify(next));
     } catch {
