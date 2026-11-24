@@ -8,7 +8,8 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "bot": "node bot/index.js"
+    "bot": "node bot/index.js",
+    "video-bot": "node video-bot/index.js"
   },
   "dependencies": {
     "aos": "^2.3.4",
