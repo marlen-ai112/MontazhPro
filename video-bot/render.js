@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { run, ensureDir } from './media.js'
+import { textFilters } from './text.js'
+import { addSubtitles } from './subtitles.js'
 
 const SIZES = { vertical: [1080, 1920], horizontal: [1920, 1080], square: [1080, 1080] }
 export const TRANSITIONS = ['none', 'fade', 'wipeleft', 'wiperight', 'slideleft', 'slideright', 'circleopen', 'dissolve']
@@ -18,15 +20,6 @@ const MAX_SEGMENTS = 20
 const MAX_TOTAL = 90
 const FPS = 30
 
-function defaultFont() {
-  if (process.env.FONT) return process.env.FONT
-  if (process.platform === 'win32') return 'C:/Windows/Fonts/arialbd.ttf'
-  if (process.platform === 'darwin') return '/System/Library/Fonts/Supplemental/Arial Bold.ttf'
-  return '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
-}
-
-// Путь внутри фильтра ffmpeg: слэши прямые, двоеточие экранировано.
-const filterPath = p => p.replace(/\\/g, '/').replace(/:/g, '\\:')
 const num = (v, min, max, dflt) => {
   const n = Number(v)
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt
@@ -62,18 +55,8 @@ export function normalizePlan(plan, clips) {
     end: num(c.end, 0, finalLen, finalLen),
   })).filter(c => c.text && c.end > c.start)
 
-  return { orientation, transition, tdur, color, audio, segments, captions, finalLen, summary: String(plan.summary || '').slice(0, 600) }
-}
-
-function wrap(text, width) {
-  const words = text.split(/\s+/)
-  const lines = []
-  let line = ''
-  for (const w of words) {
-    if ((line + ' ' + w).trim().length > width) { lines.push(line); line = w } else line = (line + ' ' + w).trim()
-  }
-  if (line) lines.push(line)
-  return lines.join('\n')
+  const subtitles = plan.subtitles === true && audio === 'keep'
+  return { orientation, transition, tdur, color, audio, segments, captions, subtitles, finalLen, summary: String(plan.summary || '').slice(0, 600) }
 }
 
 // Шаг 1: каждый фрагмент в одинаковый формат (размер, fps, звук).
@@ -147,20 +130,9 @@ async function join(files, plan, dir, out, crf, [W, H]) {
     alabel = keep ? prevA : null
   }
 
-  // подписи
-  const font = defaultFont()
-  let cur = vlabel
-  const fs_ = Math.round((W < H ? W : H) / (W < H ? 17 : 15))
-  const wrapAt = W < H ? 20 : 34
-  plan.captions.forEach((c, i) => {
-    const tf = path.join(dir, `cap${i}.txt`)
-    fs.writeFileSync(tf, wrap(c.text, wrapAt), 'utf8')
-    filter += `[${cur}]drawtext=fontfile='${filterPath(font)}':textfile='${filterPath(tf)}':fontsize=${fs_}:` +
-      `fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=24:line_spacing=8:x=(w-text_w)/2:y=h-text_h-${Math.round(H / 8)}:` +
-      `enable='between(t,${c.start.toFixed(2)},${c.end.toFixed(2)})'[c${i}];`
-    cur = `c${i}`
-  })
-  filter += `[${cur}]format=yuv420p[vout]`
+  // подписи: если будут субтитры по речи, подписи уходят наверх, чтобы не перекрываться
+  const t = textFilters(vlabel, plan.captions, dir, 'cap', [W, H], plan.subtitles ? 'top' : 'bottom')
+  filter += t.filter + `[${t.label}]format=yuv420p[vout]`
 
   args.push('-filter_complex', filter, '-map', '[vout]')
   if (alabel) args.push('-map', n === 1 ? alabel : `[${alabel}]`, '-c:a', 'aac', '-b:a', '160k')
@@ -184,5 +156,19 @@ export async function renderPlan(rawPlan, clips, workDir) {
   await join(files, plan, dir, out, 21, size)
   // Telegram принимает файлы до 50 МБ: при превышении пережимаем сильнее.
   if (fs.statSync(out).size > 49 * 1024 * 1024) await join(files, plan, dir, out, 29, size)
-  return { file: out, dir, plan }
+
+  // Субтитры по речи (если просили и есть ключ распознавания)
+  let subtitles = { status: 'off', count: 0 }
+  let file = out
+  if (plan.subtitles) {
+    subtitles = await addSubtitles(out, size, dir, plan.finalLen)
+    file = subtitles.file
+    if (fs.statSync(file).size > 49 * 1024 * 1024) {
+      // слишком большой файл: пережать сильнее
+      const smaller = path.join(dir, 'result_small.mp4')
+      await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', file, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '30', '-c:a', 'copy', '-movflags', '+faststart', smaller])
+      file = smaller
+    }
+  }
+  return { file, dir, plan, subtitles }
 }
