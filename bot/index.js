@@ -299,6 +299,10 @@ async function handleMessage(chatId, text) {
     return sendText(chatId, 'История очищена.')
   }
 
+  if (!ANTHROPIC_KEY) {
+    return sendText(chatId, 'Чат с ИИ сейчас отключён (не задан ключ Anthropic). Доступны команды /tenders и автоматическая рассылка закупок.')
+  }
+
   const hist = histories.get(chatId) || []
   hist.push({ role: 'user', content: text })
 
@@ -314,9 +318,12 @@ async function handleMessage(chatId, text) {
 }
 
 async function main() {
-  if (!TG_TOKEN || !ANTHROPIC_KEY) {
-    console.error('Нужны переменные TELEGRAM_BOT_TOKEN и ANTHROPIC_API_KEY')
+  if (!TG_TOKEN) {
+    console.error('Нужна переменная TELEGRAM_BOT_TOKEN')
     process.exit(1)
+  }
+  if (!ANTHROPIC_KEY) {
+    console.warn('[bot] ANTHROPIC_API_KEY не задан: чат с ИИ отключён, работают /tenders и автопоиск закупок.')
   }
   if (!ALLOWED.length) {
     console.warn('[bot] ALLOWED_CHAT_IDS не задан: отвечаем любому. Задайте свой chat id.')
