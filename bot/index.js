@@ -7,6 +7,10 @@
 //   ALLOWED_CHAT_IDS=123456789   (кто может пользоваться ботом, через запятую)
 //   AGENT_MODEL=claude-sonnet-5-5
 
+import { spawn } from 'node:child_process'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY
 const MODEL = process.env.AGENT_MODEL || 'claude-sonnet-5-5'
@@ -21,7 +25,8 @@ const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`
 
 const SYSTEM_PROMPT = `Ты личный помощник пользователя. Отвечай по-русски, коротко и по делу.
 Когда пользователь спрашивает, что делать, давай понятный пронумерованный список шагов.
-Если чего-то не знаешь, так и скажи, не выдумывай.`
+Если чего-то не знаешь, так и скажи, не выдумывай.
+Для поиска закупок на портале zakup.sk.kz (товары, запрос ценовых предложений) используй инструмент search_tenders. Не выдумывай тендеры, суммы и ссылки: показывай только то, что вернул инструмент. Если инструмент вернул ошибку, так и скажи.`
 
 // ---- Реестр инструментов -------------------------------------------------
 // Чтобы подключить инструмент, вызовите registerTool(definition, run) до запуска:
@@ -32,6 +37,48 @@ const toolMap = new Map()
 export function registerTool(definition, run) {
   toolMap.set(definition.name, { definition, run })
 }
+
+// ---- Инструмент: поиск закупок через Playwright (Python) -----------------
+// Запускает tenders/zakup_sk.py: он открывает портал в браузере и забирает список объявлений.
+// Нужно: Python 3, pip install -r tenders/requirements.txt, playwright install chromium.
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+
+function runTenders(maxPrice) {
+  return new Promise(resolve => {
+    const args = [path.join(ROOT, 'tenders', 'zakup_sk.py'), '--price', String(maxPrice), '--max-items', '20']
+    if (process.env.TENDERS_HEADED === '1') args.push('--headed')
+    const p = spawn(PYTHON, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => p.kill(), 120000)
+    p.stdout.on('data', d => (out += d))
+    p.stderr.on('data', d => (err += d))
+    p.on('error', e => {
+      clearTimeout(timer)
+      resolve(JSON.stringify({ ok: false, error: `Не удалось запустить Python (${PYTHON}): ${e.message}` }))
+    })
+    p.on('close', () => {
+      clearTimeout(timer)
+      resolve((out.trim() || JSON.stringify({ ok: false, error: err.trim().slice(-500) || 'Пустой ответ' })).slice(0, 20000))
+    })
+  })
+}
+
+registerTool(
+  {
+    name: 'search_tenders',
+    description:
+      'Ищет опубликованные закупки на zakup.sk.kz: предмет «товар», способ «запрос ценовых предложений». ' +
+      'Открывает портал в браузере и возвращает список объявлений или ошибку портала.',
+    input_schema: {
+      type: 'object',
+      properties: { max_price: { type: 'number', description: 'Максимальная сумма в тенге (по умолчанию 5000000)' } },
+      required: [],
+    },
+  },
+  async input => runTenders(Math.max(1, Math.floor(Number(input?.max_price) || 5000000))),
+)
 
 // ---- Claude --------------------------------------------------------------
 async function ask(history) {
