@@ -14,6 +14,7 @@ playwright install chromium
 ```bash
 python tenders/zakup_sk.py                          # до 5 000 000 тг
 python tenders/zakup_sk.py --price 3000000 --max-items 10
+python tenders/zakup_sk.py --min-price 1500000 --pages 6 --max-items 50   # диапазон 1,5-5 млн, 6 страниц
 python tenders/zakup_sk.py --headed                 # показать окно браузера
 ```
 Результат: JSON в stdout (`ok`, `status`, `items`, `error`). Код возврата 0 при успехе, 2 при ошибке.

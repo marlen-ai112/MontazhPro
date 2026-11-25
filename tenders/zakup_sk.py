@@ -9,6 +9,7 @@
 
 Использование:
     python tenders/zakup_sk.py                      # до 5 000 000 тг, запрос ценовых предложений, товары
+    python tenders/zakup_sk.py --min-price 1500000 --price 5000000 --pages 6 --max-items 50
     python tenders/zakup_sk.py --price 3000000 --max-items 10
     python tenders/zakup_sk.py --headed             # показать окно браузера (если headless блокируют)
 
@@ -29,7 +30,7 @@ from playwright.sync_api import sync_playwright
 # Фильтры: предмет «товар», способ «запрос ценовых предложений», опубликованные.
 DEFAULT_URL = (
     "https://zakup.sk.kz/#/ext?tabs=advert&pto={price}&g=true&pmet=CP"
-    "&adst=PUBLISHED&lst=PUBLISHED&page=1"
+    "&adst=PUBLISHED&lst=PUBLISHED&page={page}"
 )
 # Адрес запроса списка объявлений, который делает сама страница.
 DEFAULT_API_MARK = "/eprocsearch/api/external/4dv3rts/filter"
@@ -86,6 +87,8 @@ def fetch(url, api_mark, timeout_s, headless, chrome_path, max_items):
 def main():
     ap = argparse.ArgumentParser(description="Закупки zakup.sk.kz через Playwright")
     ap.add_argument("--price", type=int, default=5_000_000, help="максимальная сумма, тг")
+    ap.add_argument("--min-price", type=int, default=0, help="минимальная сумма, тг (фильтр по полученным данным)")
+    ap.add_argument("--pages", type=int, default=1, help="сколько страниц портала просмотреть (по 10 объявлений)")
     ap.add_argument("--url", help="своя ссылка поиска (по умолчанию фильтры: товар, CP, до --price)")
     ap.add_argument("--api-mark", default=DEFAULT_API_MARK, help="часть адреса запроса со списком")
     ap.add_argument("--timeout", type=int, default=45, help="ожидание ответа портала, сек")
@@ -94,11 +97,36 @@ def main():
     ap.add_argument("--chrome-path", default=os.environ.get("CHROME_PATH"), help="путь к Chrome/Chromium, если нужен свой")
     args = ap.parse_args()
 
-    url = args.url or DEFAULT_URL.format(price=args.price)
-    try:
-        result = fetch(url, args.api_mark, args.timeout, not args.headed, args.chrome_path, args.max_items)
-    except Exception as exc:  # браузер не запустился и т.п.
-        result = {"ok": False, "status": None, "source_url": url, "total": None, "items": [], "error": str(exc)}
+    result = {"ok": False, "status": None, "source_url": None, "total": 0, "items": [], "error": None, "pages_read": 0}
+    seen = set()
+    for page_no in range(1, max(1, args.pages) + 1):
+        url = args.url or DEFAULT_URL.format(price=args.price, page=page_no)
+        try:
+            r = fetch(url, args.api_mark, args.timeout, not args.headed, args.chrome_path, 1000)
+        except Exception as exc:  # браузер не запустился и т.п.
+            r = {"ok": False, "status": None, "error": str(exc), "items": []}
+        result["source_url"] = url
+        result["status"] = r["status"]
+        if not r["ok"]:
+            result["error"] = r["error"]
+            break  # ошибку портала не повторяем
+        result["ok"] = True
+        result["pages_read"] = page_no
+        new_items = [i for i in r["items"] if i.get("id") not in seen]
+        for i in new_items:
+            seen.add(i.get("id"))
+        result["items"].extend(new_items)
+        if not new_items or args.url:  # страницы кончились или задана своя ссылка
+            break
+
+    if result["ok"]:
+        lo = args.min_price
+        result["items"] = [
+            i for i in result["items"]
+            if not isinstance(i.get("sumTruNoNds"), (int, float)) or i["sumTruNoNds"] >= lo
+        ][: args.max_items]
+        result["total"] = len(result["items"])
+        result["error"] = None
 
     print(json.dumps(result, ensure_ascii=False))
     sys.exit(0 if result["ok"] else 2)
