@@ -1,0 +1,15 @@
+# Запуск бота закупок на сервере:
+#   1. Скопируйте bot/env.docker.example в .env.bot и впишите токен и chat id.
+#   2. docker compose up -d --build
+#   3. Логи: docker compose logs -f bot
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env.bot
+    ipc: host # рекомендуется для Chromium в Docker
+    volumes:
+      - bot-state:/app/bot/.state # запоминает уже отправленные закупки между перезапусками
+
+volumes:
+  bot-state:
