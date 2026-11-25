@@ -1,0 +1,4 @@
+models/
+cache_tts/
+out/
+__pycache__/
