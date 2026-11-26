@@ -17,7 +17,9 @@ RUN pip install --no-cache-dir "playwright==1.49.0"
 # Боту нужны только эти папки; сайт (Nuxt) в образ не попадает.
 COPY bot ./bot
 COPY tenders ./tenders
+COPY office ./office
 
+EXPOSE 8787
 ENV PYTHON=python3 \
     NODE_ENV=production
 

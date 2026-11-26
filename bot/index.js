@@ -14,6 +14,8 @@
 //   TENDERS_MAX_PRICE=5000000     сумма до, тг
 //   TENDERS_PAGES=6               сколько страниц портала просматривать
 // Команда /tenders присылает весь текущий список по запросу.
+// Приложение «AI-офис» (папка office/): задайте APP_KEY (ключ доступа, от 12 символов) и при необходимости APP_PORT (8787).
+// Оно открывается в браузере iPhone по адресу http://IP_сервера:8787 и получает те же результаты, что и Telegram.
 // По новым закупкам бот дополнительно присылает точный товар, техническую спецификацию и PDF лотов:
 //   TENDERS_DETAILS=0             выключить подробности (только список)
 //   TENDERS_DETAILS_MAX=10        сколько закупок за раз разбирать подробно
@@ -25,6 +27,8 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { track, pushFeed } from './office.js'
+import { startApi } from './api.js'
 
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY
@@ -66,7 +70,7 @@ const TENDERS = {
 }
 
 // Запускает Python-коннектор и возвращает разобранный JSON ({ ok, items, error, ... }).
-function fetchTenders({ min = TENDERS.min, max = TENDERS.max, pages = TENDERS.pages } = {}) {
+function fetchTendersRaw({ min = TENDERS.min, max = TENDERS.max, pages = TENDERS.pages } = {}) {
   return new Promise(resolve => {
     const args = [
       path.join(ROOT, 'tenders', 'zakup_sk.py'),
@@ -153,13 +157,13 @@ function fmtDate(iso) {
 }
 
 async function sendTenders(chatId, header, items) {
-  await sendText(chatId, header)
+  await sendText(chatId, header, 'tenders')
   for (let i = 0; i < items.length; i += 8) {
     const text = items
       .slice(i, i + 8)
       .map((t, k) => `${i + k + 1}. ${t.nameRu}\n№${t.number} · ${fmtSum(t.sumTruNoNds)} · приём до ${fmtDate(t.acceptanceEndDateTime)}`)
       .join('\n\n')
-    await sendText(chatId, text)
+    await sendText(chatId, text, 'tenders')
   }
 }
 
@@ -170,7 +174,7 @@ const DETAILS_MAX = Number(process.env.TENDERS_DETAILS_MAX ?? 10) // сколь�
 const LOTS_FULL = Number(process.env.TENDERS_LOTS_FULL ?? 3) // у скольких лотов закупки показывать спецификацию текстом
 const PDF_MAX = Number(process.env.TENDERS_PDF_MAX ?? 5) // сколько PDF слать на закупку
 
-function fetchDetails(ids) {
+function fetchDetailsRaw(ids) {
   return new Promise(resolve => {
     const args = [path.join(ROOT, 'tenders', 'zakup_details.py'), '--ids', ids.join(','), '--out-dir', SPECS_DIR]
     if (process.env.TENDERS_HEADED === '1') args.push('--headed')
@@ -268,6 +272,7 @@ async function identifyProduct(t) {
 }
 
 async function sendDocument(chatId, filePath, caption) {
+  if (chatId === 'app') return void pushFeed('specs', caption || 'Файл', { name: path.basename(filePath), url: `/files/${encodeURIComponent(path.basename(filePath))}` })
   const form = new FormData()
   form.append('chat_id', String(chatId))
   if (caption) form.append('caption', caption.slice(0, 1000))
@@ -283,20 +288,20 @@ async function sendDetails(targets, ids) {
   const res = await fetchDetails(list)
   if (!res.ok) {
     console.error('[tenders] подробности:', res.error)
-    for (const id of targets) await sendText(id, `Не удалось получить подробности закупок: ${res.error}`).catch(() => {})
+    for (const id of targets) await sendText(id, `Не удалось получить подробности закупок: ${res.error}`, 'specs').catch(() => {})
     return
   }
   for (const t of res.tenders) {
     if (!t.ok) {
-      for (const id of targets) await sendText(id, `№${t.id}: подробности недоступны (${t.error})`).catch(() => {})
+      for (const id of targets) await sendText(id, `№${t.id}: подробности недоступны (${t.error})`, 'specs').catch(() => {})
       continue
     }
     const ai = await identifyProduct(t)
     const prices = await lotPriceBlocks(t)
     for (const id of targets) {
-      await sendText(id, describeTender(t)).catch(e => console.error('[tenders]', e.message))
-      if (ai) await sendText(id, ai).catch(() => {})
-      for (const pb of prices) await sendText(id, pb).catch(() => {})
+      await sendText(id, describeTender(t), 'specs').catch(e => console.error('[tenders]', e.message))
+      if (ai) await sendText(id, ai, 'assistant').catch(() => {})
+      for (const pb of prices) await sendText(id, pb, 'prices').catch(() => {})
       for (const l of (t.lots || []).slice(0, PDF_MAX)) {
         if (l.spec_pdf) await sendDocument(id, l.spec_pdf, `Техническая спецификация, лот ${l.number}`).catch(e => console.error('[tenders]', e.message))
       }
@@ -304,7 +309,7 @@ async function sendDetails(targets, ids) {
   }
   if (ids.length > list.length) {
     const rest = ids.length - list.length
-    for (const id of targets) await sendText(id, `Ещё ${rest} закупок не разобраны подробно. Пришлите /tender <номер>, чтобы получить спецификацию нужной.`).catch(() => {})
+    for (const id of targets) await sendText(id, `Ещё ${rest} закупок не разобраны подробно. Пришлите /tender <номер>, чтобы получить спецификацию нужной.`, 'specs').catch(() => {})
   }
 }
 
@@ -318,7 +323,7 @@ const TAX = Number(process.env.TENDER_TAX_PERCENT ?? 3) / 100
 const EXTRA = Number(process.env.TENDER_EXTRA_PERCENT ?? 5) / 100
 const PRICE_LOTS = Number(process.env.TENDERS_PRICE_LOTS ?? 5)
 
-function fetchPrices(queries) {
+function fetchPricesRaw(queries) {
   return new Promise(resolve => {
     const args = [path.join(ROOT, 'tenders', 'prices.py')]
     for (const q of queries) args.push('--query', q)
@@ -405,6 +410,11 @@ async function lotPriceBlocks(t) {
   return lots.map((l, i) => `Лот ${l.number}: ${l.exact_product?.[0]?.trim() || l.name}\n${priceBlock(l, res.results?.[i])}`)
 }
 
+// Обёртки: пока работает коннектор, сотрудник в приложении «AI-офис» сидит за компьютером.
+const fetchTenders = o => track('tenders', 'Ищу закупки на портале', fetchTendersRaw(o))
+const fetchDetails = ids => track('specs', `Читаю спецификацию №${ids.join(', ')}`.slice(0, 40), fetchDetailsRaw(ids))
+const fetchPrices = qs => track('prices', 'Ищу цены и считаю маржу', fetchPricesRaw(qs))
+
 let tendersBusy = false
 let tendersFailures = 0
 
@@ -418,7 +428,7 @@ async function checkTenders(targets, { all = false } = {}) {
       tendersFailures++
       console.error('[tenders]', res.error)
       if (all || tendersFailures === 3) {
-        for (const id of targets) await sendText(id, `Не удалось получить закупки: ${res.error}`).catch(() => {})
+        for (const id of targets) await sendText(id, `Не удалось получить закупки: ${res.error}`, 'tenders').catch(() => {})
       }
       return
     }
@@ -431,7 +441,7 @@ async function checkTenders(targets, { all = false } = {}) {
     saveSeen(new Set([...(seen || []), ...items.map(i => String(i.id))]))
 
     if (!fresh.length) {
-      if (all) for (const id of targets) await sendText(id, 'Подходящих закупок не найдено.').catch(() => {})
+      if (all) for (const id of targets) await sendText(id, 'Подходящих закупок не найдено.', 'tenders').catch(() => {})
       return
     }
     const header = all
@@ -450,6 +460,7 @@ async function checkTenders(targets, { all = false } = {}) {
 function startTenderSchedule() {
   const minutes = process.env.TENDERS_NOTIFY_MINUTES === undefined ? 60 : Number(process.env.TENDERS_NOTIFY_MINUTES)
   const targets = (process.env.TENDERS_CHAT_IDS || ALLOWED.join(',')).split(',').map(s => s.trim()).filter(Boolean)
+  if (process.env.APP_KEY) targets.push('app') // командный пункт приложения «AI-офис»
   if (!(minutes > 0)) return console.log('[tenders] автопоиск выключен')
   if (!targets.length) return console.warn('[tenders] автопоиск выключен: задайте ALLOWED_CHAT_IDS или TENDERS_CHAT_IDS')
   console.log(`[tenders] автопоиск каждые ${minutes} мин, получателей: ${targets.length}`)
@@ -519,7 +530,9 @@ async function tg(method, body) {
   return json.result
 }
 
-async function sendText(chatId, text) {
+async function sendText(chatId, text, agent = 'system') {
+  // Командный пункт приложения «AI-офис» — виртуальный чат 'app': пишем в ленту, а не в Telegram.
+  if (chatId === 'app') return void pushFeed(agent, text)
   // Telegram принимает до 4096 символов в одном сообщении.
   for (let i = 0; i < text.length; i += 4000) {
     await tg('sendMessage', { chat_id: chatId, text: text.slice(i, i + 4000) })
@@ -536,17 +549,41 @@ function trimHistory(hist) {
   return sliced
 }
 
+const HELP = `Команды:
+/tenders — найти закупки (товар, запрос ценовых предложений)
+/tender 1275177 — точный товар, спецификация, цены и маржа по закупке
+/price насос ручной гидравлический 2л | 130000 — цены на товар; после «|» цена заказчика за единицу для расчёта маржи
+/reset — очистить историю чата с ИИ
+Можно писать и словами: «тендеры», «тендер 1275177», «цены кабель ВВГ».`
+
 async function handleMessage(chatId, text) {
+  // Простые слова вместо команд
+  const w = text.trim()
+  if (/^(найди|найти)?\s*тендеры?$/i.test(w)) text = '/tenders'
+  else if (/^тендер\s*№?\s*(\d{5,9})$/i.test(w)) text = '/tender ' + w.match(/(\d{5,9})/)[1]
+  else if (/^цены?\s+.+/i.test(w)) text = '/price ' + w.replace(/^цены?\s+/i, '')
+
+  if (text === '/help') return sendText(chatId, HELP, 'assistant')
+  const pm = text.match(/^\/price\s+([\s\S]+)$/)
+  if (pm) {
+    const [q, revStr] = pm[1].split('|').map(x => x.trim())
+    const rev = Number((revStr || '').replace(/[^\d.]/g, '')) || undefined
+    await sendText(chatId, `Ищу цены на «${q}»…`, 'prices')
+    const res = await fetchPrices([q])
+    return sendText(chatId, res.ok ? priceBlock({ price_per_unit: rev, quantity: 1 }, res.results?.[0]) : `Не удалось получить цены: ${res.error}`, 'prices')
+  }
+  if (text === '/price') return sendText(chatId, 'Укажите товар: /price насос ручной гидравлический 2л | 130000', 'prices')
+
   if (text === '/start') {
-    return sendText(chatId, `Привет! Напишите, что нужно сделать, и я помогу с планом.\nВаш chat id: ${chatId}\n/tenders — список закупок (товар, запрос ценовых предложений).\n/tender 1275177 — точный товар и техническая спецификация закупки.\n/reset — очистить историю.`)
+    return sendText(chatId, `Привет! Напишите, что нужно сделать, и я помогу с планом.\nВаш chat id: ${chatId}\n/tenders — список закупок (товар, запрос ценовых предложений).\n/tender 1275177 — точный товар, спецификация, цены и маржа.\n/price товар | цена заказчика — цены и маржа.\n/help — все команды.\n/reset — очистить историю.`)
   }
   if (text === '/tenders') {
-    await sendText(chatId, 'Ищу закупки на портале, это займёт около минуты…')
+    await sendText(chatId, 'Ищу закупки на портале, это займёт около минуты…', 'tenders')
     return checkTenders([chatId], { all: true })
   }
   const one = text.match(/^\/tender\s+№?(\d{5,9})\b/)
   if (one) {
-    await sendText(chatId, `Открываю закупку №${one[1]} на портале, это займёт около минуты…`)
+    await sendText(chatId, `Открываю закупку №${one[1]} на портале, это займёт около минуты…`, 'specs')
     return sendDetails([chatId], [one[1]])
   }
   if (text === '/tender') {
@@ -558,20 +595,20 @@ async function handleMessage(chatId, text) {
   }
 
   if (!ANTHROPIC_KEY) {
-    return sendText(chatId, 'Чат с ИИ сейчас отключён (не задан ключ Anthropic). Доступны команды /tenders и автоматическая рассылка закупок.')
+    return sendText(chatId, 'Чат с ИИ сейчас отключён (не задан ключ Anthropic). Доступны команды: /help.', 'assistant')
   }
 
   const hist = histories.get(chatId) || []
   hist.push({ role: 'user', content: text })
 
   try {
-    const reply = await ask(trimHistory(hist))
+    const reply = await track('assistant', 'Отвечаю на вопрос', ask(trimHistory(hist)))
     hist.push({ role: 'assistant', content: reply })
     histories.set(chatId, trimHistory(hist))
-    await sendText(chatId, reply)
+    await sendText(chatId, reply, 'assistant')
   } catch (e) {
     console.error('[bot] ask failed:', e.message)
-    await sendText(chatId, 'Произошла ошибка, попробуйте ещё раз позже.')
+    await sendText(chatId, 'Произошла ошибка, попробуйте ещё раз позже.', 'assistant')
   }
 }
 
@@ -588,6 +625,18 @@ async function main() {
   }
 
   console.log(`Бот запущен, модель ${MODEL}, инструментов: ${toolMap.size}`)
+  if (process.env.APP_KEY) {
+    if (process.env.APP_KEY.length < 12) console.warn('[api] APP_KEY короткий: задайте не менее 12 символов.')
+    startApi({
+      key: process.env.APP_KEY,
+      port: Number(process.env.APP_PORT || 8787),
+      officeDir: path.join(ROOT, 'office'),
+      specsDir: SPECS_DIR,
+      onCommand: t => handleMessage('app', t),
+    })
+  } else {
+    console.log('[api] приложение AI-офис выключено (не задан APP_KEY)')
+  }
   startTenderSchedule()
   let offset = 0
 

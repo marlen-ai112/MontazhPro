@@ -8,6 +8,8 @@ services:
     restart: unless-stopped
     env_file: .env.bot
     ipc: host # рекомендуется для Chromium в Docker
+    ports:
+      - "8787:8787" # приложение AI-офис (нужен APP_KEY в .env.bot)
     volumes:
       - bot-state:/app/bot/.state # запоминает уже отправленные закупки между перезапусками
 
