@@ -24,6 +24,11 @@ import sys
 import time
 
 from playwright.sync_api import TimeoutError as PWTimeout
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from spec_digest import digest_pdf, format_digest
+except Exception:  # нет pymupdf: остаётся только текст спецификации
+    digest_pdf = format_digest = None
 from playwright.sync_api import sync_playwright
 
 CARD_URL = "https://zakup.sk.kz/#/ext(popup:item/{id}/advert)?tabs=advert"
@@ -186,6 +191,14 @@ def one_tender(page, tid, timeout_s, out_dir):
                 fh.write(data)
             lot["spec_pdf"] = path
             lot["spec_text"] = pdf_to_text(path)
+            # Бесплатный разбор по правилам (без ИИ): таблица требований, условия поставки, аналоги, сертификаты, гарантия, стандарты.
+            try:
+                d = digest_pdf(path) if digest_pdf else None
+                if d:
+                    lot["digest"] = d
+                    lot["digest_lines"] = format_digest(d)
+            except Exception:
+                pass
             break
         page.wait_for_timeout(500)  # небольшая пауза между файлами
     return res

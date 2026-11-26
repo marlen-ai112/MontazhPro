@@ -238,7 +238,8 @@ function describeTender(t) {
     lines.push(`Количество: ${l.quantity ?? '—'} ${l.unit || ''} · цена за ед. ${l.price_per_unit != null ? fmtSum(l.price_per_unit) : '—'} · всего ${l.sum != null ? fmtSum(l.sum) : '—'}`)
     if (l.delivery) lines.push(`Доставка: ${l.delivery}${l.duration ? ` (срок: ${l.duration})` : ''}`)
     const spec = specSection(l.spec_text)
-    if (spec) lines.push('', 'Техническая спецификация:', spec.slice(0, 1800) + (spec.length > 1800 ? '\n… (полный текст в PDF)' : ''))
+    if (l.digest_lines?.length) lines.push('', 'Разбор спецификации (по правилам, без ИИ):', ...l.digest_lines)
+    else if (spec) lines.push('', 'Техническая спецификация:', spec.slice(0, 1800) + (spec.length > 1800 ? '\n… (полный текст в PDF)' : ''))
     else if (!l.spec_pdf) lines.push('Техническая спецификация: не удалось получить' + (l.spec_error ? ` (${l.spec_error})` : ''))
   }
   return lines.join('\n')

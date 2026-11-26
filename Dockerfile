@@ -12,7 +12,7 @@ RUN apt-get update \
 WORKDIR /app
 
 # Версия playwright должна совпадать с версией образа (v1.49.0), иначе не найдётся браузер.
-RUN pip install --no-cache-dir "playwright==1.49.0"
+RUN pip install --no-cache-dir "playwright==1.49.0" pymupdf
 
 # Боту нужны только эти папки; сайт (Nuxt) в образ не попадает.
 COPY bot ./bot
