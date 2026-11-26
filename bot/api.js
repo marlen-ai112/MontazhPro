@@ -26,7 +26,15 @@ export function startApi({ key, port, officeDir, specsDir, onCommand }) {
   const keyHash = sha(key)
 
   const authed = (req, url) => {
-    const given = req.headers['x-app-key'] || url.searchParams.get('key') || ''
+    let given = req.headers['x-app-key'] || url.searchParams.get('key') || ''
+    if (req.headers['x-app-key']) {
+      // приложение кодирует ключ (encodeURIComponent), чтобы в заголовок попадали только безопасные символы
+      try {
+        given = decodeURIComponent(given)
+      } catch {
+        /* ключ без кодирования */
+      }
+    }
     return crypto.timingSafeEqual(sha(given), keyHash)
   }
 

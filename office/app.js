@@ -402,7 +402,7 @@ function applyState(st) {
 }
 
 async function api(path, opts) {
-  const res = await fetch(API + path, { ...opts, headers: { 'x-app-key': key, 'content-type': 'application/json' } })
+  const res = await fetch(API + path, { ...opts, headers: { 'x-app-key': encodeURIComponent(key), 'content-type': 'application/json' } })
   if (res.status === 401) throw Object.assign(new Error('auth'), { auth: true })
   if (!res.ok) throw new Error('HTTP ' + res.status)
   return res.json()
@@ -452,14 +452,14 @@ function showLogin(err) {
 }
 $('loginForm').addEventListener('submit', async e => {
   e.preventDefault()
-  key = $('keyInp').value.trim()
+  key = $('keyInp').value.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
   try {
     applyState(await api('/api/state?since=0'))
     try { localStorage.setItem('officeKey', key) } catch (x) { /* ничего */ }
     $('login').classList.add('hidden')
     setConn('● на связи', 'ok')
   } catch (x) {
-    $('loginErr').textContent = x.auth ? 'Неверный ключ доступа' : 'Нет связи с сервером'
+    $('loginErr').textContent = x.auth ? 'Неверный ключ доступа' : `Не удалось подключиться (${x.message || 'ошибка'}). Проверьте адрес http://… и ключ.`
   }
 })
 $('demoBtn').addEventListener('click', () => { demo = true; $('login').classList.add('hidden'); startDemo() })
