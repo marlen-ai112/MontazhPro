@@ -1,7 +1,7 @@
-#!/bin/bash
+#!/bin/sh
 # Скрипт первого запуска сервера (Ubuntu 24.04) для бота закупок.
 # Вставьте его целиком в поле «Скрипт при создании / cloud-init / user-data» в панели Timeweb,
-# либо выполните на сервере: bash server-setup.sh
+# либо выполните на сервере: sh server-setup.sh
 #
 # Что делает: ставит Docker, скачивает проект, создаёт файл настроек .env.bot,
 # а если токен и chat id заполнены ниже, сразу запускает бота.
@@ -18,7 +18,7 @@ REPO="https://github.com/marlen-ai112/MontazhPro"
 BRANCH="claude/ai-agent-vtido4"
 DIR="/opt/montazhpro"
 
-exec > >(tee -a /var/log/bot-setup.log) 2>&1
+exec >> /var/log/bot-setup.log 2>&1
 set -u
 echo "=== $(date) начало настройки ==="
 export DEBIAN_FRONTEND=noninteractive
