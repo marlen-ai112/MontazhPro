@@ -139,11 +139,18 @@ def main():
                     try:
                         page.wait_for_selector("table", timeout=args.timeout * 1000)
                     except Exception:
-                        result["error"] = "Портал не показал таблицу объявлений"
-                        break
+                        pass
                     found, items, nxt = read_page(page)
                     if not found:
-                        result["error"] = "На странице нет таблицы «Наименование объявления» (сайт мог измениться)"
+                        text = re.sub(r"\s+", " ", page.inner_text("body"))
+                        if re.search(r"не найден|ничего не найдено|нет данных|записей нет", text, re.I):
+                            # сайт ответил, что по фильтрам объявлений нет
+                            result["ok"] = True
+                            result["pages_read"] = n
+                            break
+                        # Показываем, что именно написано на странице, чтобы понять причину.
+                        snippet = text[:200]
+                        result["error"] = f"Портал не показал таблицу объявлений. Заголовок: «{page.title()[:80]}». Адрес: {page.url[:90]}. Текст: {snippet}"
                         break
                     result["ok"] = True
                     result["pages_read"] = n
