@@ -632,6 +632,12 @@ async function handleMessage(chatId, text) {
   const ex = text.match(/^\/explore\s+(https?:\/\/\S+)(?:\s+(.+))?$/)
   if (ex) return explore(chatId, ex[1], ex[2])
   const pm = text.match(/^\/price\s+([\s\S]+)$/)
+  // /price 1275177: если вместо названия товара вставили номер закупки, разбираем закупку целиком
+  if (pm && /^№?\s*\d{6,9}$/.test(pm[1].trim())) {
+    const num = pm[1].match(/\d{6,9}/)[0]
+    await sendText(chatId, `«${num}» похоже на номер закупки. Цены ищутся по названию товара, поэтому разбираю закупку целиком (точный товар, спецификация, цены, маржа).`, 'prices')
+    return handleMessage(chatId, '/tender ' + num)
+  }
   if (pm) {
     const [q, revStr] = pm[1].split('|').map(x => x.trim())
     const rev = Number((revStr || '').replace(/[^\d.]/g, '')) || undefined
