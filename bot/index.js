@@ -240,13 +240,48 @@ function describeTender(t) {
   return lines.join('\n')
 }
 
-// Необязательно: если задан ключ Anthropic, ИИ определяет точный товар по спецификации.
-async function identifyProduct(t) {
-  if (!ANTHROPIC_KEY) return ''
-  const lots = (t.lots || []).slice(0, LOTS_FULL).map(l => ({
-    lot: l.number,
+// Агент «Спецификации»: читает спецификацию каждого лота и определяет, какой именно товар нужен.
+// Нужен ключ Anthropic (ANTHROPIC_API_KEY). Режим расходов задаёт TENDERS_AI:
+//   demand (по умолчанию) — ИИ работает только по команде /tender номер, auto — ещё и по каждой новой закупке, off — выключен.
+// AGENT_MODEL выбирает модель (дешевле: claude-haiku-5-5). TENDERS_AI_LOTS — сколько лотов разбирать (3).
+const AI_MODE = (process.env.TENDERS_AI || 'demand').toLowerCase()
+const AI_LOTS = Number(process.env.TENDERS_AI_LOTS ?? 3)
+
+const LOT_TOOL = {
+  name: 'lot_analysis',
+  description: 'Результат разбора лотов закупки по их спецификациям.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      lots: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            lot: { type: 'string', description: 'Номер лота' },
+            product: { type: 'string', description: 'Какой именно товар нужен: тип, марка или модель если указаны, главные параметры' },
+            key_params: { type: 'array', items: { type: 'string' }, description: 'Обязательные параметры и стандарты, кратко (до 8 пунктов)' },
+            analogs: { type: 'string', description: 'Допускаются ли аналоги и на каких условиях; если не указано, так и написать' },
+            checks: { type: 'array', items: { type: 'string' }, description: 'Что проверить при поставке: сертификаты, гарантия, срок, упаковка, комплектность (до 5 пунктов)' },
+            search_query: { type: 'string', description: 'Короткий запрос (3–8 слов) для поиска этого товара в интернет-магазине, с главным параметром' },
+          },
+          required: ['lot', 'product', 'key_params', 'analogs', 'checks', 'search_query'],
+        },
+      },
+    },
+    required: ['lots'],
+  },
+}
+
+// Возвращает { text, queries } или null. queries: номер лота -> запрос для поиска цен.
+async function analyzeLots(t) {
+  if (!ANTHROPIC_KEY) return null
+  const lots = (t.lots || []).slice(0, AI_LOTS).filter(l => l.spec_text || l.exact_product?.length)
+  if (!lots.length) return null
+  const payload = lots.map(l => ({
+    lot: String(l.number),
     name: l.name,
-    exact_product_from_portal: l.exact_product,
+    product_from_portal: l.exact_product,
     quantity: `${l.quantity} ${l.unit || ''}`,
     spec: specSection(l.spec_text).slice(0, 5000),
   }))
@@ -256,22 +291,36 @@ async function identifyProduct(t) {
       headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 1200,
+        max_tokens: 2000,
         system:
-          'Ты помощник поставщика. По данным закупки определи ТОЧНЫЙ товар, который нужен заказчику. ' +
-          'Для каждого лота ответь по-русски кратко: 1) Что за товар (тип, модель/артикул/марка если указаны, ключевые параметры и стандарты); ' +
-          '2) Что обязательно проверить при поставке (допустимы ли аналоги, сертификаты, гарантия, упаковка); ' +
-          '3) Под какой запрос искать этот товар у поставщиков. Используй только данные из спецификации, ничего не выдумывай; если чего-то не указано, так и напиши.',
-        messages: [{ role: 'user', content: JSON.stringify({ закупка: t.name, лоты: lots }) }],
+          'Ты агент «Спецификации» в команде поставщика. По данным закупки определи ТОЧНЫЙ товар, который нужен заказчику, для каждого лота. ' +
+          'Опирайся только на текст спецификации и данные портала. Ничего не выдумывай: если марка, модель или условие не указаны, так и напиши. ' +
+          'Пиши по-русски кратко. Запрос для поиска делай коротким и с главным параметром, без слов «ГОСТ» и без лишних уточнений.',
+        tools: [LOT_TOOL],
+        tool_choice: { type: 'tool', name: 'lot_analysis' },
+        messages: [{ role: 'user', content: `Закупка: ${t.name}\n${JSON.stringify(payload)}` }],
       }),
     })
     if (!res.ok) throw new Error(`Anthropic ${res.status}`)
     const data = await res.json()
-    const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim()
-    return text ? `🔎 Разбор ИИ:\n${text}` : ''
+    const out = data.content.find(b => b.type === 'tool_use')?.input?.lots
+    if (!Array.isArray(out) || !out.length) throw new Error('пустой ответ модели')
+    const queries = {}
+    const blocks = out.map(r => {
+      if (r.search_query) queries[String(r.lot)] = String(r.search_query).trim()
+      const list = (a, label) => (a?.length ? `${label}: ${a.join('; ')}` : '')
+      return [
+        `Лот ${r.lot}: ${r.product}`,
+        list(r.key_params, 'Параметры'),
+        r.analogs ? `Аналоги: ${r.analogs}` : '',
+        list(r.checks, 'Проверить'),
+        r.search_query ? `Запрос для поиска цен: ${r.search_query}` : '',
+      ].filter(Boolean).join('\n')
+    })
+    return { text: `🔎 Разбор агента «Спецификации»:\n\n${blocks.join('\n\n')}`, queries }
   } catch (e) {
-    console.error('[tenders] разбор ИИ не удался:', e.message)
-    return ''
+    console.error('[tenders] разбор лота не удался:', e.message)
+    return { text: `Агент «Спецификации» не смог разобрать лоты: ${e.message}`, queries: {} }
   }
 }
 
@@ -287,7 +336,7 @@ async function sendDocument(chatId, filePath, caption) {
 }
 
 // Разбирает закупки подробно и шлёт каждому получателю: описание, спецификацию и PDF.
-async function sendDetails(targets, ids) {
+async function sendDetails(targets, ids, { ai: useAi = false } = {}) {
   if (!ids.length) return
   const list = ids.slice(0, DETAILS_MAX)
   const res = await fetchDetails(list)
@@ -301,11 +350,12 @@ async function sendDetails(targets, ids) {
       for (const id of targets) await sendText(id, `№${t.id}: подробности недоступны (${t.error})`, 'specs').catch(() => {})
       continue
     }
-    const ai = await identifyProduct(t)
-    const prices = await lotPriceBlocks(t)
+    const analysis = useAi && ANTHROPIC_KEY && AI_MODE !== 'off' ? await track('specs', 'ИИ разбирает лот', analyzeLots(t)) : null
+    const prices = await lotPriceBlocks(t, analysis?.queries)
     for (const id of targets) {
       await sendText(id, describeTender(t), 'specs').catch(e => console.error('[tenders]', e.message))
-      if (ai) await sendText(id, ai, 'assistant').catch(() => {})
+      if (analysis?.text) await sendText(id, analysis.text, 'specs').catch(() => {})
+      else if (useAi && (!ANTHROPIC_KEY || AI_MODE === 'off')) await sendText(id, 'Разбор агента «Спецификации» выключен: не задан ключ ANTHROPIC_API_KEY (или TENDERS_AI=off).', 'specs').catch(() => {})
       for (const pb of prices) await sendText(id, pb, 'prices').catch(() => {})
       for (const l of (t.lots || []).slice(0, PDF_MAX)) {
         if (l.spec_pdf) await sendDocument(id, l.spec_pdf, `Техническая спецификация, лот ${l.number}`).catch(e => console.error('[tenders]', e.message))
@@ -406,11 +456,12 @@ function priceBlock(lot, res) {
 }
 
 // Для лотов закупки ищет цены и возвращает тексты (по одному на лот).
-async function lotPriceBlocks(t) {
+async function lotPriceBlocks(t, aiQueries = {}) {
   if (process.env.TENDERS_PRICES === '0') return []
   const lots = (t.lots || []).slice(0, PRICE_LOTS)
   if (!lots.length) return []
-  const res = await fetchPrices(lots.map(priceQuery))
+  const queryFor = l => aiQueries[String(l.number)] || priceQuery(l)
+  const res = await fetchPrices(lots.map(queryFor))
   if (!res.ok && !(res.results || []).length) return [`💰 Цены: не удалось получить (${res.error})`]
   return lots.map((l, i) => `Лот ${l.number}: ${l.exact_product?.[0]?.trim() || l.name}\n${priceBlock(l, res.results?.[i])}`)
 }
@@ -491,7 +542,7 @@ async function checkTenders(targets, { all = false } = {}) {
         : `Новых закупок: ${fresh.length}`
     for (const id of targets) await sendTenders(id, header, fresh).catch(e => console.error('[tenders]', e.message))
     // Автопоиск: по новым закупкам сразу присылаем спецификацию и точный товар. Для /tenders (весь список) — по запросу /tender <номер>.
-    if (!all && process.env.TENDERS_DETAILS !== '0') await sendDetails(targets, fresh.filter(i => i.source !== 'goszakup').map(i => String(i.id)))
+    if (!all && process.env.TENDERS_DETAILS !== '0') await sendDetails(targets, fresh.filter(i => i.source !== 'goszakup').map(i => String(i.id)), { ai: AI_MODE === 'auto' })
   } finally {
     tendersBusy = false
   }
@@ -657,7 +708,7 @@ async function handleMessage(chatId, text) {
   const one = text.match(/^\/tender\s+№?(\d{5,9})\b/)
   if (one) {
     await sendText(chatId, `Открываю закупку №${one[1]} на портале, это займёт около минуты…`, 'specs')
-    return sendDetails([chatId], [one[1]])
+    return sendDetails([chatId], [one[1]], { ai: true })
   }
   if (text === '/tender') {
     return sendText(chatId, 'Укажите номер закупки: /tender 1275177')
