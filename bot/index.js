@@ -14,6 +14,10 @@
 //   TENDERS_MAX_PRICE=5000000     сумма до, тг
 //   TENDERS_PAGES=6               сколько страниц портала просматривать
 // Команда /tenders присылает весь текущий список по запросу.
+// По новым закупкам бот дополнительно присылает точный товар, техническую спецификацию и PDF лотов:
+//   TENDERS_DETAILS=0             выключить подробности (только список)
+//   TENDERS_DETAILS_MAX=10        сколько закупок за раз разбирать подробно
+// Команда /tender 1275177 присылает подробности нужной закупки. Если задан ANTHROPIC_API_KEY, добавляется разбор ИИ.
 
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -157,6 +161,139 @@ async function sendTenders(chatId, header, items) {
   }
 }
 
+// ---- Подробности закупки: точный товар и техническая спецификация -----------
+// Запускает tenders/zakup_details.py: он открывает карточку закупки, читает лоты и скачивает PDF спецификаций.
+const SPECS_DIR = path.join(ROOT, 'bot', '.state', 'specs')
+const DETAILS_MAX = Number(process.env.TENDERS_DETAILS_MAX ?? 10) // сколько закупок за раз разбирать подробно
+
+function fetchDetails(ids) {
+  return new Promise(resolve => {
+    const args = [path.join(ROOT, 'tenders', 'zakup_details.py'), '--ids', ids.join(','), '--out-dir', SPECS_DIR]
+    if (process.env.TENDERS_HEADED === '1') args.push('--headed')
+    const p = spawn(PYTHON, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => p.kill(), 60000 * Math.max(2, ids.length))
+    p.stdout.on('data', d => (out += d))
+    p.stderr.on('data', d => (err += d))
+    p.on('error', e => {
+      clearTimeout(timer)
+      resolve({ ok: false, tenders: [], error: `Не удалось запустить Python (${PYTHON}): ${e.message}` })
+    })
+    p.on('close', () => {
+      clearTimeout(timer)
+      try {
+        resolve(JSON.parse(out))
+      } catch {
+        resolve({ ok: false, tenders: [], error: err.trim().slice(-500) || 'Пустой ответ коннектора' })
+      }
+    })
+  })
+}
+
+// Оставляет в тексте спецификации раздел «Описание и требуемые … характеристики».
+function specSection(text) {
+  if (!text) return ''
+  const m = text.search(/\n\s*2\.\s*Описание и требуемые/)
+  return (m >= 0 ? text.slice(m) : text).replace(/\n{2,}/g, '\n').trim()
+}
+
+// Текст по закупке без ИИ: что именно нужно и какие требования.
+function describeTender(t) {
+  const lines = [
+    `📦 №${t.number} · ${t.name || ''}`,
+    `Заказчик: ${t.customer || '—'}`,
+    `Сумма: ${t.sum != null ? fmtSum(t.sum) : '—'} · приём до ${fmtDate(t.accept_until)}`,
+  ]
+  const contacts = [t.customer_phone, t.customer_email].filter(Boolean).join(', ')
+  if (contacts) lines.push(`Контакты: ${contacts}`)
+  for (const [i, l] of (t.lots || []).entries()) {
+    lines.push('', `— Лот ${i + 1} (${l.number}): ${l.name || ''}`)
+    lines.push(`ТОЧНЫЙ ТОВАР: ${l.exact_product?.length ? l.exact_product.join('; ') : [l.name, l.brief].filter(Boolean).join(', ')}`)
+    if (l.oktru_category) lines.push(`Категория ОКТРУ: ${l.oktru_category}`)
+    lines.push(`Количество: ${l.quantity ?? '—'} ${l.unit || ''} · цена за ед. ${l.price_per_unit != null ? fmtSum(l.price_per_unit) : '—'} · всего ${l.sum != null ? fmtSum(l.sum) : '—'}`)
+    if (l.delivery) lines.push(`Доставка: ${l.delivery}${l.duration ? ` (срок: ${l.duration})` : ''}`)
+    const spec = specSection(l.spec_text)
+    if (spec) lines.push('', 'Техническая спецификация:', spec.slice(0, 1800) + (spec.length > 1800 ? '\n… (полный текст в PDF)' : ''))
+    else if (!l.spec_pdf) lines.push('Техническая спецификация: не удалось получить' + (l.spec_error ? ` (${l.spec_error})` : ''))
+  }
+  return lines.join('\n')
+}
+
+// Необязательно: если задан ключ Anthropic, ИИ определяет точный товар по спецификации.
+async function identifyProduct(t) {
+  if (!ANTHROPIC_KEY) return ''
+  const lots = (t.lots || []).slice(0, 5).map(l => ({
+    lot: l.number,
+    name: l.name,
+    exact_product_from_portal: l.exact_product,
+    quantity: `${l.quantity} ${l.unit || ''}`,
+    spec: specSection(l.spec_text).slice(0, 5000),
+  }))
+  try {
+    const res = await fetch(`${process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com'}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 1200,
+        system:
+          'Ты помощник поставщика. По данным закупки определи ТОЧНЫЙ товар, который нужен заказчику. ' +
+          'Для каждого лота ответь по-русски кратко: 1) Что за товар (тип, модель/артикул/марка если указаны, ключевые параметры и стандарты); ' +
+          '2) Что обязательно проверить при поставке (допустимы ли аналоги, сертификаты, гарантия, упаковка); ' +
+          '3) Под какой запрос искать этот товар у поставщиков. Используй только данные из спецификации, ничего не выдумывай; если чего-то не указано, так и напиши.',
+        messages: [{ role: 'user', content: JSON.stringify({ закупка: t.name, лоты: lots }) }],
+      }),
+    })
+    if (!res.ok) throw new Error(`Anthropic ${res.status}`)
+    const data = await res.json()
+    const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim()
+    return text ? `🔎 Разбор ИИ:\n${text}` : ''
+  } catch (e) {
+    console.error('[tenders] разбор ИИ не удался:', e.message)
+    return ''
+  }
+}
+
+async function sendDocument(chatId, filePath, caption) {
+  const form = new FormData()
+  form.append('chat_id', String(chatId))
+  if (caption) form.append('caption', caption.slice(0, 1000))
+  form.append('document', new Blob([fs.readFileSync(filePath)], { type: 'application/pdf' }), path.basename(filePath))
+  const res = await fetch(`${TG_API}/sendDocument`, { method: 'POST', body: form })
+  const json = await res.json()
+  if (!json.ok) throw new Error(`sendDocument: ${json.description}`)
+}
+
+// Разбирает закупки подробно и шлёт каждому получателю: описание, спецификацию и PDF.
+async function sendDetails(targets, ids) {
+  const list = ids.slice(0, DETAILS_MAX)
+  const res = await fetchDetails(list)
+  if (!res.ok) {
+    console.error('[tenders] подробности:', res.error)
+    for (const id of targets) await sendText(id, `Не удалось получить подробности закупок: ${res.error}`).catch(() => {})
+    return
+  }
+  for (const t of res.tenders) {
+    if (!t.ok) {
+      for (const id of targets) await sendText(id, `№${t.id}: подробности недоступны (${t.error})`).catch(() => {})
+      continue
+    }
+    const ai = await identifyProduct(t)
+    for (const id of targets) {
+      await sendText(id, describeTender(t)).catch(e => console.error('[tenders]', e.message))
+      if (ai) await sendText(id, ai).catch(() => {})
+      for (const l of (t.lots || []).slice(0, 5)) {
+        if (l.spec_pdf) await sendDocument(id, l.spec_pdf, `Техническая спецификация, лот ${l.number}`).catch(e => console.error('[tenders]', e.message))
+      }
+    }
+  }
+  if (ids.length > list.length) {
+    const rest = ids.length - list.length
+    for (const id of targets) await sendText(id, `Ещё ${rest} закупок не разобраны подробно. Пришлите /tender <номер>, чтобы получить спецификацию нужной.`).catch(() => {})
+  }
+}
+
 let tendersBusy = false
 let tendersFailures = 0
 
@@ -192,6 +329,8 @@ async function checkTenders(targets, { all = false } = {}) {
         ? `Первый список закупок: ${fresh.length}`
         : `Новых закупок: ${fresh.length}`
     for (const id of targets) await sendTenders(id, header, fresh).catch(e => console.error('[tenders]', e.message))
+    // Автопоиск: по новым закупкам сразу присылаем спецификацию и точный товар. Для /tenders (весь список) — по запросу /tender <номер>.
+    if (!all && process.env.TENDERS_DETAILS !== '0') await sendDetails(targets, fresh.map(i => String(i.id)))
   } finally {
     tendersBusy = false
   }
@@ -288,11 +427,19 @@ function trimHistory(hist) {
 
 async function handleMessage(chatId, text) {
   if (text === '/start') {
-    return sendText(chatId, `Привет! Напишите, что нужно сделать, и я помогу с планом.\nВаш chat id: ${chatId}\n/tenders — список закупок (товар, запрос ценовых предложений).\n/reset — очистить историю.`)
+    return sendText(chatId, `Привет! Напишите, что нужно сделать, и я помогу с планом.\nВаш chat id: ${chatId}\n/tenders — список закупок (товар, запрос ценовых предложений).\n/tender 1275177 — точный товар и техническая спецификация закупки.\n/reset — очистить историю.`)
   }
   if (text === '/tenders') {
     await sendText(chatId, 'Ищу закупки на портале, это займёт около минуты…')
     return checkTenders([chatId], { all: true })
+  }
+  const one = text.match(/^\/tender\s+№?(\d{5,9})\b/)
+  if (one) {
+    await sendText(chatId, `Открываю закупку №${one[1]} на портале, это займёт около минуты…`)
+    return sendDetails([chatId], [one[1]])
+  }
+  if (text === '/tender') {
+    return sendText(chatId, 'Укажите номер закупки: /tender 1275177')
   }
   if (text === '/reset') {
     histories.delete(chatId)
