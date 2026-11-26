@@ -161,7 +161,11 @@ async function sendTenders(chatId, header, items) {
   for (let i = 0; i < items.length; i += 8) {
     const text = items
       .slice(i, i + 8)
-      .map((t, k) => `${i + k + 1}. ${t.nameRu}\n№${t.number} · ${fmtSum(t.sumTruNoNds)} · приём до ${fmtDate(t.acceptanceEndDateTime)}`)
+      .map((t, k) => {
+        const head = `${i + k + 1}. ${t.nameRu}${t.source === 'goszakup' ? ' [госзакупки]' : ''}`
+        const line = `№${t.number} · ${t.sumTruNoNds != null ? fmtSum(t.sumTruNoNds) : '—'} · приём до ${fmtDate(t.acceptanceEndDateTime)}`
+        return t.source === 'goszakup' ? `${head}\n${line}${t.customer ? `\n${t.customer}` : ''}\n${t.url}` : `${head}\n${line}`
+      })
       .join('\n\n')
     await sendText(chatId, text, 'tenders')
   }
@@ -284,6 +288,7 @@ async function sendDocument(chatId, filePath, caption) {
 
 // Разбирает закупки подробно и шлёт каждому получателю: описание, спецификацию и PDF.
 async function sendDetails(targets, ids) {
+  if (!ids.length) return
   const list = ids.slice(0, DETAILS_MAX)
   const res = await fetchDetails(list)
   if (!res.ok) {
@@ -410,33 +415,68 @@ async function lotPriceBlocks(t) {
   return lots.map((l, i) => `Лот ${l.number}: ${l.exact_product?.[0]?.trim() || l.name}\n${priceBlock(l, res.results?.[i])}`)
 }
 
+// Госзакупки (goszakup.gov.kz): второй источник. GOSZAKUP=0 выключает, GOSZAKUP_PAGES=3 — сколько страниц читать.
+function fetchGoszakupRaw({ min = TENDERS.min, max = TENDERS.max } = {}) {
+  return new Promise(resolve => {
+    const pages = Number(process.env.GOSZAKUP_PAGES ?? 3)
+    const args = [path.join(ROOT, 'tenders', 'goszakup.py'), '--price', String(max), '--min-price', String(min), '--pages', String(pages)]
+    if (process.env.TENDERS_HEADED === '1') args.push('--headed')
+    const p = spawn(PYTHON, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => p.kill(), 60000 * Math.max(2, pages))
+    p.stdout.on('data', d => (out += d))
+    p.stderr.on('data', d => (err += d))
+    p.on('error', e => {
+      clearTimeout(timer)
+      resolve({ ok: false, items: [], error: `Не удалось запустить Python (${PYTHON}): ${e.message}` })
+    })
+    p.on('close', () => {
+      clearTimeout(timer)
+      try {
+        resolve(JSON.parse(out))
+      } catch {
+        resolve({ ok: false, items: [], error: err.trim().slice(-300) || 'Пустой ответ коннектора' })
+      }
+    })
+  })
+}
+
 // Обёртки: пока работает коннектор, сотрудник в приложении «AI-офис» сидит за компьютером.
 const fetchTenders = o => track('tenders', 'Ищу закупки на портале', fetchTendersRaw(o))
+const fetchGoszakup = o => track('tenders', 'Ищу на госзакупках', fetchGoszakupRaw(o))
 const fetchDetails = ids => track('specs', `Читаю спецификацию №${ids.join(', ')}`.slice(0, 40), fetchDetailsRaw(ids))
 const fetchPrices = qs => track('prices', 'Ищу цены и считаю маржу', fetchPricesRaw(qs))
 
 let tendersBusy = false
 let tendersFailures = 0
+let gzFailures = 0
 
 // all=false: слать только новые закупки (автопоиск); all=true: весь список (команда /tenders).
 async function checkTenders(targets, { all = false } = {}) {
   if (tendersBusy) return
   tendersBusy = true
   try {
-    const res = await fetchTenders()
-    if (!res.ok) {
-      tendersFailures++
-      console.error('[tenders]', res.error)
-      if (all || tendersFailures === 3) {
-        for (const id of targets) await sendText(id, `Не удалось получить закупки: ${res.error}`, 'tenders').catch(() => {})
-      }
-      return
+    const sk = await fetchTenders()
+    const gz = process.env.GOSZAKUP === '0' ? null : await fetchGoszakup()
+    // Ошибки источников: сообщаем при /tenders сразу, при автопоиске после 3 неудач подряд.
+    const problems = []
+    const short = e => String(e || 'ошибка').replace(/ at https?:\S+/g, '').slice(0, 160)
+    if (!sk.ok) problems.push(`zakup.sk.kz: ${short(sk.error)}`)
+    if (gz && !gz.ok) problems.push(`goszakup.gov.kz: ${short(gz.error)}`)
+    if (!sk.ok) tendersFailures++
+    else tendersFailures = 0
+    if (gz) gzFailures = gz.ok ? 0 : gzFailures + 1
+    if (problems.length) console.error('[tenders]', problems.join(' | '))
+    const failedOnce = (!sk.ok && tendersFailures === 3) || (gz && !gz.ok && gzFailures === 3)
+    if (problems.length && (all || failedOnce)) {
+      for (const id of targets) await sendText(id, `Не удалось получить закупки с части источников:\n${problems.join('\n')}`, 'tenders').catch(() => {})
     }
-    tendersFailures = 0
+    if (!sk.ok && !(gz && gz.ok)) return
 
     const seen = loadSeen()
     const first = seen === null
-    const items = res.items
+    const items = [...(sk.ok ? sk.items : []), ...(gz && gz.ok ? gz.items : [])]
     const fresh = all || first ? items : items.filter(i => !seen.has(String(i.id)))
     saveSeen(new Set([...(seen || []), ...items.map(i => String(i.id))]))
 
@@ -445,13 +485,13 @@ async function checkTenders(targets, { all = false } = {}) {
       return
     }
     const header = all
-      ? `Найдено закупок: ${items.length} (товар, запрос ценовых предложений, ${fmtSum(TENDERS.min)} – ${fmtSum(TENDERS.max)})`
+      ? `Найдено закупок: ${items.length} (товар, запрос ценовых предложений, ${fmtSum(TENDERS.min)} – ${fmtSum(TENDERS.max)}; источники: zakup.sk.kz${gz?.ok ? ', goszakup.gov.kz' : ''})`
       : first
         ? `Первый список закупок: ${fresh.length}`
         : `Новых закупок: ${fresh.length}`
     for (const id of targets) await sendTenders(id, header, fresh).catch(e => console.error('[tenders]', e.message))
     // Автопоиск: по новым закупкам сразу присылаем спецификацию и точный товар. Для /tenders (весь список) — по запросу /tender <номер>.
-    if (!all && process.env.TENDERS_DETAILS !== '0') await sendDetails(targets, fresh.map(i => String(i.id)))
+    if (!all && process.env.TENDERS_DETAILS !== '0') await sendDetails(targets, fresh.filter(i => i.source !== 'goszakup').map(i => String(i.id)))
   } finally {
     tendersBusy = false
   }
