@@ -424,7 +424,7 @@ function fetchGoszakupRaw({ min = TENDERS.min, max = TENDERS.max } = {}) {
     const p = spawn(PYTHON, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
     let out = ''
     let err = ''
-    const timer = setTimeout(() => p.kill(), 60000 * Math.max(2, pages))
+    const timer = setTimeout(() => p.kill(), 170000 * Math.max(2, pages)) // сайт бывает очень медленным
     p.stdout.on('data', d => (out += d))
     p.stderr.on('data', d => (err += d))
     p.on('error', e => {
@@ -457,8 +457,8 @@ async function checkTenders(targets, { all = false } = {}) {
   if (tendersBusy) return
   tendersBusy = true
   try {
-    const sk = await fetchTenders()
-    const gz = process.env.GOSZAKUP === '0' ? null : await fetchGoszakup()
+    // Оба источника опрашиваем одновременно: госзакупки бывают очень медленными.
+    const [sk, gz] = await Promise.all([fetchTenders(), process.env.GOSZAKUP === '0' ? null : fetchGoszakup()])
     // Ошибки источников: сообщаем при /tenders сразу, при автопоиске после 3 неудач подряд.
     const problems = []
     const short = e => String(e || 'ошибка').replace(/ at https?:\S+/g, '').slice(0, 160)
