@@ -62,6 +62,8 @@ export function startApi({ key, port, officeDir, specsDir, onCommand }) {
     const f = fails.get(ip)
     if (f && f.n >= 10 && Date.now() < f.until) return send(429, { error: 'too many attempts' })
     if (!authed(req, url)) {
+      // Запросы вообще без ключа (окно входа открыто) не считаем подбором.
+      if (!req.headers['x-app-key'] && !url.searchParams.get('key')) return send(401, { error: 'unauthorized' })
       const n = (f && Date.now() < f.until ? f.n : 0) + 1
       fails.set(ip, { n, until: Date.now() + 10 * 60 * 1000 })
       return send(401, { error: 'unauthorized' })

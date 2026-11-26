@@ -388,6 +388,7 @@ function emptyHint() {
 let lastId = 0
 let polling = false
 let failures = 0
+let needLogin = false // пока окно входа открыто, сервер не опрашиваем
 
 function applyState(st) {
   let changed = false
@@ -409,14 +410,14 @@ async function api(path, opts) {
 }
 
 async function poll() {
-  if (demo || polling || document.hidden) return
+  if (demo || polling || document.hidden || needLogin || !key) return
   polling = true
   try {
     applyState(await api('/api/state?since=' + lastId))
     failures = 0
     setConn('● на связи', 'ok')
   } catch (e) {
-    if (e.auth) { showLogin('Неверный ключ доступа'); return }
+    if (e.auth) { try { localStorage.removeItem('officeKey') } catch (x) { /* ничего */ } key = ''; showLogin('Ключ не подошёл, введите его снова'); return }
     failures++
     setConn(failures > 1 ? '● нет связи' : '…', 'bad')
   } finally {
@@ -447,6 +448,7 @@ $('form').addEventListener('submit', e => {
 
 // ---- Вход ---------------------------------------------------------------------
 function showLogin(err) {
+  needLogin = true
   $('login').classList.remove('hidden')
   $('loginErr').textContent = err || ''
 }
@@ -456,13 +458,14 @@ $('loginForm').addEventListener('submit', async e => {
   try {
     applyState(await api('/api/state?since=0'))
     try { localStorage.setItem('officeKey', key) } catch (x) { /* ничего */ }
+    needLogin = false
     $('login').classList.add('hidden')
     setConn('● на связи', 'ok')
   } catch (x) {
-    $('loginErr').textContent = x.auth ? 'Неверный ключ доступа' : `Не удалось подключиться (${x.message || 'ошибка'}). Проверьте адрес http://… и ключ.`
+    $('loginErr').textContent = x.auth ? 'Неверный ключ доступа' : x.message === 'HTTP 429' ? 'Слишком много попыток входа. Подождите 10 минут или перезапустите бота на сервере.' : `Не удалось подключиться (${x.message || 'ошибка'}). Проверьте адрес http://… и ключ.`
   }
 })
-$('demoBtn').addEventListener('click', () => { demo = true; $('login').classList.add('hidden'); startDemo() })
+$('demoBtn').addEventListener('click', () => { demo = true; needLogin = false; $('login').classList.add('hidden'); startDemo() })
 
 // ---- Демо (без сервера) ---------------------------------------------------------
 function setStatus(id, status, task) {
