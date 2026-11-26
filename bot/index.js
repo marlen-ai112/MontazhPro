@@ -27,8 +27,10 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { track, pushFeed } from './office.js'
+import { track, pushFeed, agents } from './office.js'
 import { startApi } from './api.js'
+import { makeReels, parseCaption, sttConfigured } from './reels.js'
+import { spawnSync } from 'node:child_process'
 
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY
@@ -608,6 +610,103 @@ function startTenderSchedule() {
   if (process.env.TENDERS_RUN_ON_START === '1') setTimeout(() => checkTenders(targets, { report: true }), 5000)
 }
 
+// ---- Агент «Видеомонтаж»: рилс из присланного видео ---------------------------------------------
+// Видео можно прислать боту в Telegram (до 20 МБ) или загрузить кнопкой 📎 в приложении AI-офис (до VIDEO_MAX_MB, 150).
+// Подпись к видео: заголовок, «стиль: кино|тёплый|чб|резкий», «без субтитров», «без нарезки».
+// Что делает: режет паузы в речи, вертикальный кадр 9:16, зум-акценты, резкая цветокоррекция, заголовок, субтитры по речи
+// (субтитры только если задан STT_API_KEY). Платные ключи для монтажа не нужны.
+const VIDEO_OUT = path.join(ROOT, 'bot', '.state', 'video-out')
+const VIDEO_IN = path.join(ROOT, 'bot', '.state', 'video-in')
+const ffmpegOk = ['ffmpeg', 'ffprobe'].every(t => !spawnSync(t, ['-version']).error)
+if (!ffmpegOk) agents.video.task = 'ffmpeg не установлен'
+else agents.video.status = 'idle'
+
+// Старые файлы (старше 3 дней) удаляем, чтобы не заполнить диск.
+function cleanOldVideos() {
+  for (const dir of [VIDEO_IN, VIDEO_OUT]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        const fp = path.join(dir, f)
+        if (Date.now() - fs.statSync(fp).mtimeMs > 3 * 24 * 3600 * 1000) fs.rmSync(fp, { recursive: true, force: true })
+      }
+    } catch { /* папки ещё нет */ }
+  }
+}
+
+let reelsChain = Promise.resolve() // монтаж идёт по одному: серверу не хватит памяти на несколько сразу
+
+async function sendVideo(chatId, filePath, caption) {
+  const via2 = String(chatId).match(/^t2:(.+)$/)
+  const token = via2 && TENDERS_BOT_TOKEN ? TENDERS_BOT_TOKEN : TG_TOKEN
+  const form = new FormData()
+  form.append('chat_id', String(via2 ? via2[1] : chatId))
+  if (caption) form.append('caption', caption.slice(0, 1000))
+  form.append('supports_streaming', 'true')
+  form.append('video', new Blob([fs.readFileSync(filePath)], { type: 'video/mp4' }), path.basename(filePath))
+  const res = await fetch(`${TG_BASE}/bot${token}/sendVideo`, { method: 'POST', body: form })
+  const json = await res.json()
+  if (!json.ok) throw new Error(`sendVideo: ${json.description}`)
+}
+
+// Монтирует ролик из файла и отправляет результат туда, откуда пришло видео (и в командный пункт приложения).
+function processVideo(chatId, file, captionText) {
+  const job = reelsChain.then(async () => {
+    const targets = chatId === 'app' ? ['app'] : [chatId, ...(process.env.APP_KEY ? ['app'] : [])]
+    const say = async (text, f) => { for (const id of targets) await sendText(id, text, 'video').catch(() => {}); return f }
+    if (!ffmpegOk) return say('Монтаж недоступен: на сервере не установлен ffmpeg.')
+    const opts = parseCaption(captionText)
+    await say(`Принял видео. Монтирую: ${opts.cuts ? 'режу паузы, ' : ''}вертикальный кадр 9:16, стиль «${({ sharp: 'резкий яркий', cinema: 'кино', warm: 'тёплый', bw: 'чёрно-белый' })[opts.style]}»${opts.title ? `, заголовок «${opts.title}»` : ''}. Это займёт 1–3 минуты…`)
+    try {
+      const { file: out, info } = await track('video', 'Монтирую рилс', makeReels(file, { ...opts, workDir: path.join(VIDEO_IN, `work_${Date.now()}`), out: path.join(VIDEO_OUT, `reels_${Date.now()}.mp4`) }))
+      const subs = info.subtitles === 'ok' ? `субтитры: ${opts.subtitles ? 'есть' : 'нет'}`
+        : info.subtitles === 'no_key' ? 'субтитры не добавлены (нет ключа распознавания речи STT_API_KEY)'
+        : info.subtitles === 'off' ? 'без субтитров' : `субтитры: ${info.subtitles}`
+      const text = `✅ Рилс готов: ${info.resultSec} с (было ${info.sourceSec} с), ${info.segments} фрагм., ${info.cutSilence ? 'паузы вырезаны' : 'без вырезания пауз'}, стиль «${info.style}», ${info.title ? 'заголовок есть' : 'без заголовка'}, ${subs}. ${info.sizeMb} МБ.`
+      for (const id of targets) {
+        if (id === 'app') pushFeed('video', text, { name: path.basename(out), url: `/files/${encodeURIComponent(path.basename(out))}` })
+        else {
+          await sendVideo(id, out, text).catch(async e => {
+            console.error('[video]', e.message)
+            await sendText(id, `${text}\nФайл не удалось отправить в Telegram (${e.message}). Он лежит в приложении AI-офис.`, 'video').catch(() => {})
+          })
+        }
+      }
+      if (chatId !== 'app' && process.env.APP_KEY) { /* в ленте приложения уже есть ссылка на файл */ }
+    } catch (e) {
+      console.error('[video]', e.message)
+      await say(`Не удалось смонтировать видео: ${String(e.message).slice(0, 300)}`)
+    } finally {
+      cleanOldVideos()
+    }
+  })
+  reelsChain = job.catch(() => {})
+  return job
+}
+
+// Видео из Telegram: скачиваем (лимит Bot API 20 МБ) и отдаём на монтаж.
+async function handleTelegramVideo(chatId, msg) {
+  const media = msg.video || msg.video_note || (msg.document?.mime_type?.startsWith('video/') ? msg.document : null)
+  if (!media) return false
+  const sizeMb = (media.file_size || 0) / 1024 / 1024
+  if (sizeMb > 20) {
+    await sendText(chatId, `Видео ${sizeMb.toFixed(0)} МБ: Telegram не даёт боту скачивать файлы больше 20 МБ. Загрузите его в приложении AI-офис кнопкой 📎 (до ${process.env.VIDEO_MAX_MB || 150} МБ).`, 'video')
+    return true
+  }
+  try {
+    const f = await tg('getFile', { file_id: media.file_id })
+    const res = await fetch(`${TG_BASE}/file/bot${TG_TOKEN}/${f.file_path}`)
+    if (!res.ok) throw new Error(`скачивание: HTTP ${res.status}`)
+    fs.mkdirSync(VIDEO_IN, { recursive: true })
+    const ext = path.extname(f.file_path) || '.mp4'
+    const file = path.join(VIDEO_IN, `in_${Date.now()}${ext}`)
+    fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()))
+    processVideo(chatId, file, msg.caption || '').catch(e => console.error('[video]', e.message))
+  } catch (e) {
+    await sendText(chatId, `Не удалось получить видео: ${e.message}`, 'video')
+  }
+  return true
+}
+
 // ---- Claude --------------------------------------------------------------
 async function ask(history) {
   const convo = [...history]
@@ -729,6 +828,7 @@ const HELP = `Команды:
 /tender 1275177 — точный товар, спецификация, цены и маржа по закупке
 /price насос ручной гидравлический 2л | 130000 — цены на товар; после «|» цена заказчика за единицу для расчёта маржи
 /explore https://сайт — изучить страницу нового источника закупок (служебная)
+Видео: пришлите видео боту (до 20 МБ) или загрузите кнопкой 📎 в AI-офисе. В подписи: заголовок, «стиль: кино|тёплый|чб|резкий», «без субтитров», «без нарезки». Бот вернёт рилс 9:16: паузы вырезаны, резкая цветокоррекция, заголовок.
 /reset — очистить историю чата с ИИ
 Можно писать и словами: «тендеры», «тендер 1275177», «цены кабель ВВГ».`
 
@@ -816,7 +916,10 @@ async function main() {
       port: Number(process.env.APP_PORT || 8787),
       officeDir: path.join(ROOT, 'office'),
       specsDir: SPECS_DIR,
+      videoOutDir: VIDEO_OUT,
+      videoInDir: VIDEO_IN,
       onCommand: t => handleMessage('app', t),
+      onVideo: (file, caption) => processVideo('app', file, caption),
     })
   } else {
     console.log('[api] приложение AI-офис выключено (не задан APP_KEY)')
@@ -837,7 +940,7 @@ async function main() {
     for (const update of updates) {
       offset = update.update_id + 1
       const msg = update.message
-      if (!msg?.text) continue
+      if (!msg || (!msg.text && !msg.video && !msg.video_note && !msg.document)) continue
 
       const chatId = String(msg.chat.id)
       if (ALLOWED.length && !ALLOWED.includes(chatId)) {
@@ -845,6 +948,10 @@ async function main() {
         continue
       }
 
+      if (!msg.text) {
+        await handleTelegramVideo(chatId, msg).catch(e => console.error('[bot]', e.message))
+        continue
+      }
       await handleMessage(chatId, msg.text).catch(e => console.error('[bot]', e.message))
     }
   }

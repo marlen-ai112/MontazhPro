@@ -31,7 +31,8 @@ const AGENTS = [
   { id: 'assistant', name: 'ИИ-помощник', color: '#ffb340', hair: '#5a3b1c', desk: 3,
     hint: 'Отвечает на вопросы свободным текстом (нужен ключ Anthropic).', cmds: [] },
   { id: 'video', name: 'Видеомонтаж', color: '#ff5e7a', hair: '#15151c', desk: 4,
-    hint: 'Монтаж видео работает отдельным ботом (папка video-bot), в офис пока не подключён.', cmds: [] },
+    hint: 'Монтирует рилс из вашего видео: режет паузы в речи, вертикальный кадр 9:16, резкая цветокоррекция, заголовок. Нажмите 📎, выберите видео. В строке ввода можно написать заголовок и «стиль: кино» (тёплый, чб, резкий), «без субтитров», «без нарезки».',
+    cmds: [['Как монтировать', '/help']] },
 ]
 
 // Столы: [x, y] верхнего левого угла стола. Ряд 1 у стены, ряд 2 ниже.
@@ -43,7 +44,7 @@ for (const a of AGENTS) {
   a.chair = [dx + 10, dy + 11] // место за столом
   a.x = 14 + a.desk * 20
   a.y = 90 + (a.desk % 2) * 6
-  a.status = a.id === 'video' ? 'offline' : 'idle'
+  a.status = 'idle' // реальный статус приходит с сервера
   a.task = ''
   a.path = []
   a.pose = 'stand'
@@ -273,7 +274,7 @@ const chipsEl = $('chips')
 const inp = $('inp')
 let selected = null
 
-const STATUS_LABEL = { idle: 'свободен', working: 'работает', offline: 'не подключён' }
+const STATUS_LABEL = { idle: 'свободен', working: 'работает', offline: 'не подключён (нет ffmpeg)' }
 
 function renderRoster() {
   rosterEl.innerHTML = ''
@@ -356,6 +357,12 @@ function addMsg(m) {
     const body = document.createElement('span')
     linkify(body, m.text || '')
     d.appendChild(body)
+    if (m.file && /\.mp4$/i.test(m.file.url)) {
+      const src = m.file.url + (key ? (m.file.url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key) : '')
+      const v = document.createElement('video')
+      v.src = src; v.controls = true; v.playsInline = true; v.preload = 'metadata'
+      d.appendChild(v)
+    }
     if (m.file) {
       const f = document.createElement('a')
       f.className = 'file'
@@ -446,6 +453,43 @@ $('form').addEventListener('submit', e => {
   send(t)
 })
 
+// ---- Загрузка видео на монтаж (кнопка 📎) ------------------------------------------------
+const fileInp = $('file')
+$('attach').addEventListener('click', () => fileInp.click())
+fileInp.addEventListener('change', () => {
+  const f = fileInp.files && fileInp.files[0]
+  fileInp.value = ''
+  if (!f) return
+  const caption = inp.value.trim()
+  inp.value = ''
+  if (demo) return demoVideo(f, caption)
+  const note = document.createElement('div')
+  note.className = 'msg'
+  note.style.borderLeftColor = byId.video.color
+  note.innerHTML = '<span class="who"></span><span class="t"></span><span class="bar"><i></i></span>'
+  note.querySelector('.who').style.color = byId.video.color
+  note.querySelector('.who').textContent = byId.video.name
+  note.querySelector('.t').textContent = `Загружаю «${f.name}» (${(f.size / 1048576).toFixed(1)} МБ)…`
+  const empty = feedEl.querySelector('.empty'); if (empty) empty.remove()
+  feedEl.appendChild(note); feedEl.scrollTop = feedEl.scrollHeight
+  const xhr = new XMLHttpRequest()
+  xhr.open('POST', API + `/api/upload?name=${encodeURIComponent(f.name)}&caption=${encodeURIComponent(caption)}`)
+  xhr.setRequestHeader('x-app-key', encodeURIComponent(key))
+  xhr.upload.onprogress = e => { if (e.lengthComputable) note.querySelector('.bar i').style.width = Math.round((e.loaded / e.total) * 100) + '%' }
+  xhr.onload = () => {
+    note.remove()
+    if (xhr.status === 401) return showLogin('Неверный ключ доступа')
+    if (xhr.status !== 200) {
+      let msg = 'ошибка ' + xhr.status
+      try { msg = JSON.parse(xhr.responseText).error || msg } catch (e) { /* ничего */ }
+      return addMsg({ agent: 'system', text: 'Видео не загружено: ' + msg })
+    }
+    poll()
+  }
+  xhr.onerror = () => { note.remove(); addMsg({ agent: 'system', text: 'Видео не загружено: нет связи с сервером.' }) }
+  xhr.send(f)
+})
+
 // ---- Вход ---------------------------------------------------------------------
 function showLogin(err) {
   needLogin = true
@@ -497,6 +541,11 @@ function demoCommand(text) {
     demoWork('assistant', 'Думаю…', 3000, () => reply('assistant', 'Это демо: настоящий ответ придёт, когда приложение подключено к серверу.'))
   }
 }
+function demoVideo(f, caption) {
+  addMsg({ agent: 'user', text: `🎬 Видео на монтаж: ${f.name}${caption ? '\n' + caption : ''}` })
+  addMsg({ agent: 'video', text: 'Принял видео. Монтирую (демо)…' })
+  demoWork('video', 'Монтирую рилс', 6000, () => addMsg({ agent: 'video', text: '✅ Рилс готов (демо): паузы вырезаны, 9:16, резкая цветокоррекция. В настоящем режиме здесь будет плеер с роликом.' }))
+}
 function startDemo() {
   setConn('● демо', '')
   addMsg({ agent: 'system', text: 'Демо-режим: данные не настоящие. Попробуйте команду «Найти тендеры» или нажмите на персонажа.' })
@@ -504,7 +553,7 @@ function startDemo() {
     const idle = AGENTS.filter(a => a.status === 'idle')
     if (idle.length && Math.random() < 0.6) {
       const a = idle[Math.floor(Math.random() * idle.length)]
-      const tasks = { tenders: 'Ищу закупки…', specs: 'Читаю PDF', prices: 'Сверяю цены', assistant: 'Думаю…' }
+      const tasks = { tenders: 'Ищу закупки…', specs: 'Читаю PDF', prices: 'Сверяю цены', assistant: 'Думаю…', video: 'Монтирую рилс' }
       if (tasks[a.id]) demoWork(a.id, tasks[a.id], 5000 + Math.random() * 5000)
     }
     setTimeout(loop, 7000 + Math.random() * 5000)

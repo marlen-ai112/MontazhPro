@@ -22,7 +22,7 @@ const STATIC = {
 const sha = s => crypto.createHash('sha256').update(String(s)).digest()
 const fails = new Map() // ip -> { n, until }
 
-export function startApi({ key, port, officeDir, specsDir, onCommand }) {
+export function startApi({ key, port, officeDir, specsDir, videoOutDir, videoInDir, onCommand, onVideo }) {
   const keyHash = sha(key)
 
   const authed = (req, url) => {
@@ -96,6 +96,60 @@ export function startApi({ key, port, officeDir, specsDir, onCommand }) {
         send(200, { ok: true })
       })
       return
+    }
+
+    // Загрузка видео на монтаж: тело запроса = файл. Имя и подпись (заголовок, стиль) в адресе.
+    if (req.method === 'POST' && url.pathname === '/api/upload') {
+      const maxMb = Number(process.env.VIDEO_MAX_MB || 150)
+      if (!onVideo || !videoInDir) return send(404, { error: 'video disabled' })
+      const len = Number(req.headers['content-length'] || 0)
+      if (len > maxMb * 1024 * 1024) return send(413, { error: `Файл больше ${maxMb} МБ` })
+      const ext = (path.extname(url.searchParams.get('name') || '').toLowerCase().match(/^\.(mp4|mov|m4v|webm|mkv)$/) || ['', '.mp4'])[0] || '.mp4'
+      fs.mkdirSync(videoInDir, { recursive: true })
+      const file = path.join(videoInDir, `in_${Date.now()}${ext}`)
+      const ws = fs.createWriteStream(file)
+      let size = 0
+      let aborted = false
+      req.on('data', d => {
+        size += d.length
+        if (size > maxMb * 1024 * 1024 && !aborted) { aborted = true; ws.destroy(); req.destroy() }
+      })
+      req.pipe(ws)
+      ws.on('finish', () => {
+        if (aborted) return
+        const caption = String(url.searchParams.get('caption') || '').slice(0, 300)
+        pushFeed('user', `🎬 Видео на монтаж: ${(size / 1024 / 1024).toFixed(1)} МБ${caption ? `\n${caption}` : ''}`)
+        Promise.resolve(onVideo(file, caption)).catch(e => {
+          console.error('[api] видео:', e.message)
+          pushFeed('video', `Ошибка монтажа: ${e.message}`)
+        })
+        send(200, { ok: true })
+      })
+      ws.on('error', () => send(500, { error: 'write failed' }))
+      return
+    }
+
+    // Готовые ролики (mp4, с поддержкой Range, иначе iPhone не проигрывает): только из папки результатов.
+    if (req.method === 'GET' && url.pathname.startsWith('/files/') && url.pathname.endsWith('.mp4')) {
+      const name = decodeURIComponent(url.pathname.slice(7))
+      if (!/^[\w.\-]+\.mp4$/.test(name) || !videoOutDir) return send(400, { error: 'bad name' })
+      const file = path.join(videoOutDir, name)
+      let st
+      try { st = fs.statSync(file) } catch { return send(404, { error: 'not found' }) }
+      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '')
+      let start = 0
+      let end = st.size - 1
+      if (range) {
+        if (range[1] !== '') start = Number(range[1])
+        if (range[2] !== '') end = Math.min(end, Number(range[2]))
+        if (range[1] === '' && range[2] !== '') { start = Math.max(0, st.size - Number(range[2])); end = st.size - 1 }
+        if (start > end || start >= st.size) { res.writeHead(416, { 'content-range': `bytes */${st.size}` }); return res.end() }
+      }
+      res.writeHead(range ? 206 : 200, {
+        'content-type': 'video/mp4', 'accept-ranges': 'bytes', 'content-length': end - start + 1,
+        ...(range ? { 'content-range': `bytes ${start}-${end}/${st.size}` } : {}), 'cache-control': 'no-store',
+      })
+      return fs.createReadStream(file, { start, end }).pipe(res)
     }
 
     // PDF спецификаций: только файлы из папки specs, имя без путей.

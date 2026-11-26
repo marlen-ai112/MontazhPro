@@ -4,7 +4,7 @@ FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
 
 # Node.js 22 для бота
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates poppler-utils \
+ && apt-get install -y --no-install-recommends curl ca-certificates poppler-utils ffmpeg fonts-dejavu-core \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*

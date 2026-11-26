@@ -13,7 +13,7 @@ export const agents = {
   specs: { status: 'idle', task: '' },
   prices: { status: 'idle', task: '' },
   assistant: { status: 'idle', task: '' },
-  video: { status: 'offline', task: '' }, // монтаж работает отдельным ботом (video-bot)
+  video: { status: 'offline', task: '' }, // становится «свободен», если на сервере есть ffmpeg (см. bot/index.js)
 }
 const busy = {}
 
