@@ -32,6 +32,8 @@ DEFAULT_URL = (
     "https://zakup.sk.kz/#/ext?tabs=advert&pto={price}&g=true&pmet=CP"
     "&adst=PUBLISHED&lst=PUBLISHED&page={page}"
 )
+# То же без верхней границы суммы (--price 0).
+DEFAULT_URL_NO_MAX = "https://zakup.sk.kz/#/ext?tabs=advert&g=true&pmet=CP&adst=PUBLISHED&lst=PUBLISHED&page={page}"
 # Адрес запроса списка объявлений, который делает сама страница.
 DEFAULT_API_MARK = "/eprocsearch/api/external/4dv3rts/filter"
 
@@ -86,7 +88,7 @@ def fetch(url, api_mark, timeout_s, headless, chrome_path, max_items):
 
 def main():
     ap = argparse.ArgumentParser(description="Закупки zakup.sk.kz через Playwright")
-    ap.add_argument("--price", type=int, default=5_000_000, help="максимальная сумма, тг")
+    ap.add_argument("--price", type=int, default=5_000_000, help="максимальная сумма, тг (0 = без верхней границы)")
     ap.add_argument("--min-price", type=int, default=0, help="минимальная сумма, тг (фильтр по полученным данным)")
     ap.add_argument("--pages", type=int, default=1, help="сколько страниц портала просмотреть (по 10 объявлений)")
     ap.add_argument("--url", help="своя ссылка поиска (по умолчанию фильтры: товар, CP, до --price)")
@@ -100,7 +102,7 @@ def main():
     result = {"ok": False, "status": None, "source_url": None, "total": 0, "items": [], "error": None, "pages_read": 0}
     seen = set()
     for page_no in range(1, max(1, args.pages) + 1):
-        url = args.url or DEFAULT_URL.format(price=args.price, page=page_no)
+        url = args.url or (DEFAULT_URL.format(price=args.price, page=page_no) if args.price > 0 else DEFAULT_URL_NO_MAX.format(page=page_no))
         try:
             r = fetch(url, args.api_mark, args.timeout, not args.headed, args.chrome_path, 1000)
         except Exception as exc:  # браузер не запустился и т.п.

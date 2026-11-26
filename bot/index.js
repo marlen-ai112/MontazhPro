@@ -40,7 +40,11 @@ const ALLOWED = (process.env.ALLOWED_CHAT_IDS || '')
 
 const MAX_HISTORY = 20
 const MAX_TOOL_STEPS = 5
-const TG_API = `${process.env.TELEGRAM_API_BASE || 'https://api.telegram.org'}/bot${TG_TOKEN}`
+const TG_BASE = process.env.TELEGRAM_API_BASE || 'https://api.telegram.org'
+const TG_API = `${TG_BASE}/bot${TG_TOKEN}`
+// Отдельный бот только для рассылки закупок (необязательно): создайте его в @BotFather, откройте его в Telegram
+// и нажмите «Запустить» (иначе Telegram не даст ему писать вам). Команды по-прежнему принимает основной бот.
+const TENDERS_BOT_TOKEN = process.env.TENDERS_BOT_TOKEN || ''
 
 const SYSTEM_PROMPT = `Ты личный помощник пользователя. Отвечай по-русски, коротко и по делу.
 Когда пользователь спрашивает, что делать, давай понятный пронумерованный список шагов.
@@ -326,11 +330,13 @@ async function analyzeLots(t) {
 
 async function sendDocument(chatId, filePath, caption) {
   if (chatId === 'app') return void pushFeed('specs', caption || 'Файл', { name: path.basename(filePath), url: `/files/${encodeURIComponent(path.basename(filePath))}` })
+  const via2 = String(chatId).match(/^t2:(.+)$/)
+  const token = via2 && TENDERS_BOT_TOKEN ? TENDERS_BOT_TOKEN : TG_TOKEN
   const form = new FormData()
-  form.append('chat_id', String(chatId))
+  form.append('chat_id', String(via2 ? via2[1] : chatId))
   if (caption) form.append('caption', caption.slice(0, 1000))
   form.append('document', new Blob([fs.readFileSync(filePath)], { type: 'application/pdf' }), path.basename(filePath))
-  const res = await fetch(`${TG_API}/sendDocument`, { method: 'POST', body: form })
+  const res = await fetch(`${TG_BASE}/bot${token}/sendDocument`, { method: 'POST', body: form })
   const json = await res.json()
   if (!json.ok) throw new Error(`sendDocument: ${json.description}`)
 }
@@ -504,7 +510,7 @@ let tendersFailures = 0
 let gzFailures = 0
 
 // all=false: слать только новые закупки (автопоиск); all=true: весь список (команда /tenders).
-async function checkTenders(targets, { all = false } = {}) {
+async function checkTenders(targets, { all = false, report = false } = {}) {
   if (tendersBusy) return
   tendersBusy = true
   try {
@@ -527,36 +533,78 @@ async function checkTenders(targets, { all = false } = {}) {
 
     const seen = loadSeen()
     const first = seen === null
-    const items = [...(sk.ok ? sk.items : []), ...(gz && gz.ok ? gz.items : [])]
-    const fresh = all || first ? items : items.filter(i => !seen.has(String(i.id)))
-    saveSeen(new Set([...(seen || []), ...items.map(i => String(i.id))]))
+    const okSk = sk.ok ? sk.items : []
+    const okGz = gz && gz.ok ? gz.items : []
+    saveSeen(new Set([...(seen || []), ...okSk.map(i => String(i.id)), ...okGz.map(i => String(i.id))]))
 
-    if (!fresh.length) {
+    // Отдельный список на каждый портал, по возрастанию суммы (с самых дешёвых, от нижней границы и выше).
+    const byPrice = (a, b) => (a.sumTruNoNds ?? Infinity) - (b.sumTruNoNds ?? Infinity)
+    const pick = list => (all || first ? list : list.filter(i => !seen.has(String(i.id)))).sort(byPrice)
+    const sections = []
+    if (gz) sections.push({ title: '🏛 Госзакупки (goszakup.gov.kz)', items: pick(okGz), ok: gz.ok, details: false })
+    sections.push({ title: '🏢 Самрук-Қазына (zakup.sk.kz)', items: pick(okSk), ok: sk.ok, details: true })
+
+    const range = `от ${fmtSum(TENDERS.min)}${TENDERS.max > 0 ? ` до ${fmtSum(TENDERS.max)}` : ' и выше'}`
+    const what = all ? 'найдено' : first ? 'первый список' : 'новых'
+    const total = sections.reduce((n, x) => n + x.items.length, 0)
+
+    if (!total) {
       if (all) for (const id of targets) await sendText(id, 'Подходящих закупок не найдено.', 'tenders').catch(() => {})
+      else if (report) {
+        const when = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: TZ })
+        for (const id of targets) await sendText(id, `Проверка ${when}: новых закупок нет (${range}).`, 'tenders').catch(() => {})
+      }
       return
     }
-    const header = all
-      ? `Найдено закупок: ${items.length} (товар, запрос ценовых предложений, ${fmtSum(TENDERS.min)} – ${fmtSum(TENDERS.max)}; источники: zakup.sk.kz${gz?.ok ? ', goszakup.gov.kz' : ''})`
-      : first
-        ? `Первый список закупок: ${fresh.length}`
-        : `Новых закупок: ${fresh.length}`
-    for (const id of targets) await sendTenders(id, header, fresh).catch(e => console.error('[tenders]', e.message))
-    // Автопоиск: по новым закупкам сразу присылаем спецификацию и точный товар. Для /tenders (весь список) — по запросу /tender <номер>.
-    if (!all && process.env.TENDERS_DETAILS !== '0') await sendDetails(targets, fresh.filter(i => i.source !== 'goszakup').map(i => String(i.id)), { ai: AI_MODE === 'auto' })
+    for (const sec of sections) {
+      if (!sec.items.length) {
+        if (all || report) for (const id of targets) await sendText(id, `${sec.title}: ${sec.ok ? 'новых закупок нет' : 'источник не ответил'}.`, 'tenders').catch(() => {})
+        continue
+      }
+      const header = `${sec.title}: ${what} ${sec.items.length}. Товар, запрос ценовых предложений, ${range}. По возрастанию суммы.`
+      for (const id of targets) await sendTenders(id, header, sec.items).catch(e => console.error('[tenders]', e.message))
+      // Самрук-Қазына: сразу присылаем спецификацию и точный товар по новым закупкам. Для /tenders (весь список) — по запросу /tender <номер>.
+      if (sec.details && !all && process.env.TENDERS_DETAILS !== '0') {
+        await sendDetails(targets, sec.items.map(i => String(i.id)), { ai: AI_MODE === 'auto' })
+      }
+    }
   } finally {
     tendersBusy = false
   }
 }
 
+// Расписание: TENDERS_TIMES=09:00,13:00 (по умолчанию), часовой пояс TENDERS_TZ=Asia/Almaty.
+// TENDERS_NOTIFY_MINUTES=0 выключает автопоиск. TENDERS_RUN_ON_START=1 — ещё и проверка сразу при запуске.
+const TZ = process.env.TENDERS_TZ || 'Asia/Almaty'
+function nowInTz() {
+  const f = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+  const p = Object.fromEntries(f.formatToParts(new Date()).map(x => [x.type, x.value]))
+  return { date: `${p.year}-${p.month}-${p.day}`, hm: `${p.hour}:${p.minute}` }
+}
+
 function startTenderSchedule() {
-  const minutes = process.env.TENDERS_NOTIFY_MINUTES === undefined ? 60 : Number(process.env.TENDERS_NOTIFY_MINUTES)
-  const targets = (process.env.TENDERS_CHAT_IDS || ALLOWED.join(',')).split(',').map(s => s.trim()).filter(Boolean)
+  const enabled = process.env.TENDERS_NOTIFY_MINUTES === undefined || Number(process.env.TENDERS_NOTIFY_MINUTES) > 0
+  const times = (process.env.TENDERS_TIMES || '09:00,13:00')
+    .split(',')
+    .map(t => t.trim())
+    .filter(t => /^\d{1,2}:\d{2}$/.test(t))
+    .map(t => t.padStart(5, '0'))
+  let targets = (process.env.TENDERS_CHAT_IDS || ALLOWED.join(',')).split(',').map(s => s.trim()).filter(Boolean)
+  if (TENDERS_BOT_TOKEN) targets = targets.map(id => `t2:${id}`) // рассылка идёт через отдельный бот
   if (process.env.APP_KEY) targets.push('app') // командный пункт приложения «AI-офис»
-  if (!(minutes > 0)) return console.log('[tenders] автопоиск выключен')
+  if (!enabled || !times.length) return console.log('[tenders] автопоиск выключен')
   if (!targets.length) return console.warn('[tenders] автопоиск выключен: задайте ALLOWED_CHAT_IDS или TENDERS_CHAT_IDS')
-  console.log(`[tenders] автопоиск каждые ${minutes} мин, получателей: ${targets.length}`)
-  setTimeout(() => checkTenders(targets), 5000)
-  setInterval(() => checkTenders(targets), minutes * 60 * 1000)
+  console.log(`[tenders] автопоиск в ${times.join(' и ')} (${TZ}), получателей: ${targets.length}${TENDERS_BOT_TOKEN ? ', через отдельный бот' : ''}`)
+  const done = new Set()
+  setInterval(() => {
+    const n = nowInTz()
+    const key = `${n.date} ${n.hm}`
+    if (times.includes(n.hm) && !done.has(key)) {
+      done.add(key)
+      checkTenders(targets, { report: true })
+    }
+  }, 20000)
+  if (process.env.TENDERS_RUN_ON_START === '1') setTimeout(() => checkTenders(targets, { report: true }), 5000)
 }
 
 // ---- Claude --------------------------------------------------------------
@@ -610,8 +658,8 @@ async function ask(history) {
 }
 
 // ---- Telegram ------------------------------------------------------------
-async function tg(method, body) {
-  const res = await fetch(`${TG_API}/${method}`, {
+async function tg(method, body, token = TG_TOKEN) {
+  const res = await fetch(`${TG_BASE}/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -624,9 +672,20 @@ async function tg(method, body) {
 async function sendText(chatId, text, agent = 'system') {
   // Командный пункт приложения «AI-офис» — виртуальный чат 'app': пишем в ленту, а не в Telegram.
   if (chatId === 'app') return void pushFeed(agent, text)
+  // 't2:ID' — через отдельный бот рассылки закупок. Если он недоступен, отправляем основным ботом.
+  const via2 = String(chatId).match(/^t2:(.+)$/)
+  const token = via2 && TENDERS_BOT_TOKEN ? TENDERS_BOT_TOKEN : TG_TOKEN
+  const chat = via2 ? via2[1] : chatId
   // Telegram принимает до 4096 символов в одном сообщении.
   for (let i = 0; i < text.length; i += 4000) {
-    await tg('sendMessage', { chat_id: chatId, text: text.slice(i, i + 4000) })
+    const part = text.slice(i, i + 4000)
+    try {
+      await tg('sendMessage', { chat_id: chat, text: part }, token)
+    } catch (e) {
+      if (token === TG_TOKEN) throw e
+      console.error('[tenders] отдельный бот не смог отправить, шлю основным:', e.message)
+      await tg('sendMessage', { chat_id: chat, text: part })
+    }
   }
 }
 

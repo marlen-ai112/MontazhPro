@@ -36,9 +36,10 @@ def build_url(min_price, max_price, methods, page=1):
     q += [
         ("filter[trade_type]", "g"),
         ("filter[amount_from]", str(min_price)),
-        ("filter[amount_to]", str(max_price)),
-        ("filter[signs][]", "is_active"),
     ]
+    if max_price > 0:  # 0 = без верхней границы
+        q.append(("filter[amount_to]", str(max_price)))
+    q.append(("filter[signs][]", "is_active"))
     if page > 1:
         q.append(("page", str(page)))
     return f"{BASE}/ru/search/announce?{urlencode(q)}"
@@ -158,7 +159,7 @@ def row_to_item(r):
 
 def main():
     ap = argparse.ArgumentParser(description="Закупки goszakup.gov.kz через Playwright")
-    ap.add_argument("--price", type=int, default=5_000_000, help="сумма до, тг")
+    ap.add_argument("--price", type=int, default=5_000_000, help="сумма до, тг (0 = без верхней границы)")
     ap.add_argument("--min-price", type=int, default=1_500_000, help="сумма от, тг")
     ap.add_argument("--methods", default=os.environ.get("GOSZAKUP_METHODS", "3"), help="способы закупки через запятую (3 = запрос ценовых предложений)")
     ap.add_argument("--pages", type=int, default=3)
@@ -205,7 +206,7 @@ def main():
     if result["ok"]:
         lo, hi = args.min_price, args.price
         result["items"] = [
-            i for i in result["items"] if i["sumTruNoNds"] is None or lo <= i["sumTruNoNds"] <= hi
+            i for i in result["items"] if i["sumTruNoNds"] is None or (lo <= i["sumTruNoNds"] and (hi <= 0 or i["sumTruNoNds"] <= hi))
         ][: args.max_items]
         result["total"] = len(result["items"])
         result["error"] = None
