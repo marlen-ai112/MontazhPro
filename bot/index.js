@@ -292,9 +292,11 @@ async function sendDetails(targets, ids) {
       continue
     }
     const ai = await identifyProduct(t)
+    const prices = await lotPriceBlocks(t)
     for (const id of targets) {
       await sendText(id, describeTender(t)).catch(e => console.error('[tenders]', e.message))
       if (ai) await sendText(id, ai).catch(() => {})
+      for (const pb of prices) await sendText(id, pb).catch(() => {})
       for (const l of (t.lots || []).slice(0, PDF_MAX)) {
         if (l.spec_pdf) await sendDocument(id, l.spec_pdf, `Техническая спецификация, лот ${l.number}`).catch(e => console.error('[tenders]', e.message))
       }
@@ -304,6 +306,103 @@ async function sendDetails(targets, ids) {
     const rest = ids.length - list.length
     for (const id of targets) await sendText(id, `Ещё ${rest} закупок не разобраны подробно. Пришлите /tender <номер>, чтобы получить спецификацию нужной.`).catch(() => {})
   }
+}
+
+// ---- Цены на товар и маржа ------------------------------------------------------
+// tenders/prices.py ищет товар на Satu.kz; бот считает маржу относительно цены заказчика.
+//   TENDERS_PRICES=0         выключить поиск цен
+//   TENDER_TAX_PERCENT=3     налог, % от выручки (уточните у бухгалтера: зависит от режима ИП)
+//   TENDER_EXTRA_PERCENT=5   доставка и прочие расходы, % от выручки
+//   TENDERS_PRICE_LOTS=5     для скольких лотов закупки искать цены
+const TAX = Number(process.env.TENDER_TAX_PERCENT ?? 3) / 100
+const EXTRA = Number(process.env.TENDER_EXTRA_PERCENT ?? 5) / 100
+const PRICE_LOTS = Number(process.env.TENDERS_PRICE_LOTS ?? 5)
+
+function fetchPrices(queries) {
+  return new Promise(resolve => {
+    const args = [path.join(ROOT, 'tenders', 'prices.py')]
+    for (const q of queries) args.push('--query', q)
+    if (process.env.TENDERS_HEADED === '1') args.push('--headed')
+    const p = spawn(PYTHON, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => p.kill(), 60000 * Math.max(2, queries.length))
+    p.stdout.on('data', d => (out += d))
+    p.stderr.on('data', d => (err += d))
+    p.on('error', e => {
+      clearTimeout(timer)
+      resolve({ ok: false, results: [], error: `Не удалось запустить Python (${PYTHON}): ${e.message}` })
+    })
+    p.on('close', () => {
+      clearTimeout(timer)
+      try {
+        resolve(JSON.parse(out))
+      } catch {
+        resolve({ ok: false, results: [], error: err.trim().slice(-300) || 'Пустой ответ' })
+      }
+    })
+  })
+}
+
+const median = a => {
+  const s = [...a].sort((x, y) => x - y)
+  const m = Math.floor(s.length / 2)
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
+
+// Запрос для поиска цен: точное название товара из лота.
+const priceQuery = l => (l.exact_product?.length ? l.exact_product[0] : [l.name, l.brief].filter(Boolean).join(' ')).trim()
+
+// Считает маржу и возвращает текст по лоту. res — результат prices.py по этому лоту.
+function priceBlock(lot, res) {
+  if (!res) return ''
+  if (!res.ok) return `💰 Цены: не удалось получить (${res.error || 'нет данных'})`
+  const similar = res.offers.filter(o => o.relevance >= 0.6)
+  // Сначала точные совпадения (все слова и числа запроса); если их нет, берём похожие и предупреждаем.
+  const exact = similar.filter(o => o.relevance >= 0.99)
+  const rel = exact.length ? exact : similar
+  const approx = !exact.length
+  if (!rel.length) return `💰 Цены Satu.kz по запросу «${res.used_query}»: подходящих товаров не найдено. Нужен ручной поиск или уточнение модели.`
+  // Отсекаем явные ошибки в данных магазина (цена в разы ниже или выше типичной).
+  const med0 = median(rel.map(o => o.price))
+  const clean = rel.length >= 3 ? rel.filter(o => o.price >= med0 * 0.2 && o.price <= med0 * 5) : rel
+  const dropped = rel.length - clean.length
+  const prices = clean.map(o => o.price)
+  const min = Math.min(...prices)
+  const med = median(prices)
+  const max = Math.max(...prices)
+  const lines = [
+    `💰 Цены Satu.kz по запросу «${res.used_query}»: ${approx ? 'ПОХОЖИХ товаров' : 'точных совпадений'}: ${clean.length}${dropped ? ` (отброшено подозрительных цен: ${dropped})` : ''}`,
+    `Мин ${fmtSum(min)} · медиана ${fmtSum(med)} · макс ${fmtSum(max)} за единицу`,
+    'Дешевле всего:',
+    ...clean.slice(0, 3).map((o, i) => `${i + 1}) ${o.name} — ${fmtSum(o.price)}${o.price_from ? ' (от)' : ''}${o.in_stock ? '' : ' (под заказ)'}\n   ${o.url}`),
+  ]
+  if (approx) lines.push('⚠ Точного совпадения с названием из закупки нет: показаны похожие товары (объём, мощность и модель могут отличаться от спецификации). Маржа ориентировочная, сверьте параметры с PDF.')
+  else if (clean.length < 3) lines.push('⚠ Мало предложений, оценка приблизительная.')
+  lines.push('Поиск идёт по названию товара и не сверяет все параметры спецификации, проверьте соответствие по ссылке.')
+  const rev = lot.price_per_unit
+  if (typeof rev === 'number' && rev > 0) {
+    const qty = Number(lot.quantity) || 1
+    lines.push('', `📊 Маржа (цена заказчика ${fmtSum(rev)} за ед.; налог ${Math.round(TAX * 100)}% + прочее ${Math.round(EXTRA * 100)}%):`)
+    for (const [label, cost] of [['при закупке по минимальной цене', min], ['при закупке по медианной цене', med]]) {
+      const profit = rev * (1 - TAX - EXTRA) - cost
+      const pct = (profit / rev) * 100
+      const mark = pct >= 15 ? '✅' : pct >= 0 ? '⚠' : '❌'
+      lines.push(`${mark} ${label}: ${profit >= 0 ? '+' : '−'}${fmtSum(Math.abs(profit))}/ед. (${pct.toFixed(1)}%), на ${qty} шт.: ${profit >= 0 ? '+' : '−'}${fmtSum(Math.abs(profit * qty))}`)
+    }
+    lines.push('Проверьте: цены в магазине обычно с НДС, сумма закупки заказчика указана без НДС; доставка и гарантия не учтены.')
+  }
+  return lines.join('\n')
+}
+
+// Для лотов закупки ищет цены и возвращает тексты (по одному на лот).
+async function lotPriceBlocks(t) {
+  if (process.env.TENDERS_PRICES === '0') return []
+  const lots = (t.lots || []).slice(0, PRICE_LOTS)
+  if (!lots.length) return []
+  const res = await fetchPrices(lots.map(priceQuery))
+  if (!res.ok && !(res.results || []).length) return [`💰 Цены: не удалось получить (${res.error})`]
+  return lots.map((l, i) => `Лот ${l.number}: ${l.exact_product?.[0]?.trim() || l.name}\n${priceBlock(l, res.results?.[i])}`)
 }
 
 let tendersBusy = false
