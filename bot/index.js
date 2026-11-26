@@ -549,10 +549,35 @@ function trimHistory(hist) {
   return sliced
 }
 
+// Разведка сайта: бот открывает страницу своим браузером и присылает поля поиска, таблицы и запросы к API.
+// Нужна, чтобы подключить новый источник закупок (команда /explore https://сайт [текст ссылки для нажатия]).
+async function explore(chatId, url, clickText) {
+  await sendText(chatId, `Изучаю страницу ${url}, это займёт 1–2 минуты…`, 'tenders')
+  const out = path.join(ROOT, 'bot', '.state', 'explore.txt')
+  fs.mkdirSync(path.dirname(out), { recursive: true })
+  const args = [path.join(ROOT, 'tenders', 'explore.py'), url, '--out', out, '--wait', '6']
+  if (clickText) args.push('--click', clickText)
+  const res = await track('tenders', 'Изучаю сайт', new Promise(resolve => {
+    const p = spawn(PYTHON, args, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    let err = ''
+    const timer = setTimeout(() => p.kill(), 150000)
+    p.stderr.on('data', d => (err += d))
+    p.on('error', e => resolve({ ok: false, error: e.message }))
+    p.on('close', code => {
+      clearTimeout(timer)
+      resolve(code === 0 ? { ok: true } : { ok: false, error: err.trim().split('\n').slice(-3).join(' ').slice(0, 400) || `код ${code}` })
+    })
+  }))
+  if (!res.ok) return sendText(chatId, `Не удалось открыть страницу: ${res.error}`, 'tenders')
+  const text = fs.readFileSync(out, 'utf8')
+  for (let i = 0; i < text.length; i += 3500) await sendText(chatId, text.slice(i, i + 3500), 'tenders')
+}
+
 const HELP = `Команды:
 /tenders — найти закупки (товар, запрос ценовых предложений)
 /tender 1275177 — точный товар, спецификация, цены и маржа по закупке
 /price насос ручной гидравлический 2л | 130000 — цены на товар; после «|» цена заказчика за единицу для расчёта маржи
+/explore https://сайт — изучить страницу нового источника закупок (служебная)
 /reset — очистить историю чата с ИИ
 Можно писать и словами: «тендеры», «тендер 1275177», «цены кабель ВВГ».`
 
@@ -564,6 +589,8 @@ async function handleMessage(chatId, text) {
   else if (/^цены?\s+.+/i.test(w)) text = '/price ' + w.replace(/^цены?\s+/i, '')
 
   if (text === '/help') return sendText(chatId, HELP, 'assistant')
+  const ex = text.match(/^\/explore\s+(https?:\/\/\S+)(?:\s+(.+))?$/)
+  if (ex) return explore(chatId, ex[1], ex[2])
   const pm = text.match(/^\/price\s+([\s\S]+)$/)
   if (pm) {
     const [q, revStr] = pm[1].split('|').map(x => x.trim())

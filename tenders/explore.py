@@ -41,7 +41,7 @@ def main():
         except Exception:
             pass
         try:
-            entry["body"] = r.text()[:400].replace("\n", " ")
+            entry["body"] = r.text()[:200].replace("\n", " ")
         except Exception:
             pass
         calls.append(entry)
@@ -71,22 +71,65 @@ def main():
         lines.append("")
         lines.append("ССЫЛКИ:")
         seen = set()
+        nlinks = 0
         for text, href in page.eval_on_selector_all(
             "a", "els => els.map(e => [e.innerText.trim().slice(0, 80), e.getAttribute('href')])"
         ):
-            if (text, href) not in seen and (text or href):
+            if (text, href) not in seen and (text or href) and nlinks < 40:
                 seen.add((text, href))
+                nlinks += 1
                 lines.append(f"  {text} -> {href}")
+
+        # Формы поиска: поля, их имена и варианты выбора. Это нужно, чтобы собрать правильный запрос.
+        lines.append("")
+        lines.append("ФОРМЫ И ПОЛЯ:")
+        forms = page.evaluate(
+            r"""() => [...document.querySelectorAll('form')].slice(0, 6).map(f => ({
+                action: f.getAttribute('action'), method: f.getAttribute('method'),
+                fields: [...f.querySelectorAll('input,select,textarea')].slice(0, 60).map(e => ({
+                    tag: e.tagName.toLowerCase(), type: e.getAttribute('type'), name: e.getAttribute('name'),
+                    id: e.id || null, ph: e.getAttribute('placeholder'),
+                    label: (e.labels && e.labels[0] ? e.labels[0].innerText : '').trim().slice(0, 50),
+                    options: e.tagName === 'SELECT' ? [...e.options].slice(0, 40).map(o => o.value + '=' + o.text.trim().slice(0, 40)) : undefined
+                }))
+            }))"""
+        )
+        for f in forms:
+            lines.append(f"  форма: action={f['action']} method={f['method']}")
+            for e in f["fields"]:
+                if e["type"] in ("hidden", "submit", "button"):
+                    lines.append(f"    [{e['type']}] name={e['name']}")
+                    continue
+                opt = f" варианты: {'; '.join(e['options'])}" if e.get("options") else ""
+                lines.append(f"    <{e['tag']}> type={e['type']} name={e['name']} id={e['id']} подпись={e['label'] or e['ph']}{opt}")
+
+        # Таблицы результатов: заголовки и первые строки.
+        lines.append("")
+        lines.append("ТАБЛИЦЫ:")
+        tables = page.evaluate(
+            r"""() => [...document.querySelectorAll('table')].slice(0, 3).map(t => ({
+                head: [...t.querySelectorAll('thead th, tr:first-child th')].map(x => x.innerText.trim().slice(0, 40)),
+                rows: [...t.querySelectorAll('tbody tr')].slice(0, 3).map(r => [...r.querySelectorAll('td')].map(x => x.innerText.trim().replace(/[ \t\n\r]+/g, ' ').slice(0, 60))),
+                links: [...t.querySelectorAll('tbody a')].slice(0, 3).map(a => a.getAttribute('href'))
+            }))"""
+        )
+        for t in tables:
+            lines.append(f"  заголовки: {t['head']}")
+            for r in t["rows"]:
+                lines.append(f"    строка: {r}")
+            lines.append(f"    ссылки: {t['links']}")
 
         lines.append("")
         lines.append("ТЕКСТ СТРАНИЦЫ (начало):")
-        lines.append(page.inner_text("body")[:1500])
+        lines.append(page.inner_text("body")[:1200])
         browser.close()
 
     lines.append("")
     lines.append("ЗАПРОСЫ К API:")
-    for c in calls:
-        lines.append(f"  {c['status']} {c['method']} {c['url']}")
+    if len(calls) > 25:
+        lines.append(f"  (всего {len(calls)}, показаны первые 25)")
+    for c in calls[:25]:
+        lines.append(f"  {c['status']} {c['method']} {c['url'][:160]}")
         if c["post"]:
             lines.append(f"      тело запроса: {c['post']}")
         if c["body"]:
