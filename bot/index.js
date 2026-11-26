@@ -17,6 +17,8 @@
 // По новым закупкам бот дополнительно присылает точный товар, техническую спецификацию и PDF лотов:
 //   TENDERS_DETAILS=0             выключить подробности (только список)
 //   TENDERS_DETAILS_MAX=10        сколько закупок за раз разбирать подробно
+//   TENDERS_LOTS_FULL=3           у скольких лотов закупки показывать спецификацию текстом (остальные списком)
+//   TENDERS_PDF_MAX=5             сколько PDF спецификаций слать на закупку
 // Команда /tender 1275177 присылает подробности нужной закупки. Если задан ANTHROPIC_API_KEY, добавляется разбор ИИ.
 
 import { spawn } from 'node:child_process'
@@ -165,6 +167,8 @@ async function sendTenders(chatId, header, items) {
 // Запускает tenders/zakup_details.py: он открывает карточку закупки, читает лоты и скачивает PDF спецификаций.
 const SPECS_DIR = path.join(ROOT, 'bot', '.state', 'specs')
 const DETAILS_MAX = Number(process.env.TENDERS_DETAILS_MAX ?? 10) // сколько закупок за раз разбирать подробно
+const LOTS_FULL = Number(process.env.TENDERS_LOTS_FULL ?? 3) // у скольких лотов закупки показывать спецификацию текстом
+const PDF_MAX = Number(process.env.TENDERS_PDF_MAX ?? 5) // сколько PDF слать на закупку
 
 function fetchDetails(ids) {
   return new Promise(resolve => {
@@ -207,7 +211,15 @@ function describeTender(t) {
   ]
   const contacts = [t.customer_phone, t.customer_email].filter(Boolean).join(', ')
   if (contacts) lines.push(`Контакты: ${contacts}`)
-  for (const [i, l] of (t.lots || []).entries()) {
+  const lots = t.lots || []
+  if (lots.length > LOTS_FULL) lines.push('', `Лотов: ${t.lots_total || lots.length}. Подробно разобраны первые ${LOTS_FULL}, остальные списком ниже.`)
+  if (t.lots_warning) lines.push(`⚠ ${t.lots_warning}`)
+  for (const [i, l] of lots.entries()) {
+    if (i >= LOTS_FULL) {
+      const prod = l.exact_product?.length ? l.exact_product.map(x => x.trim()).join('; ') : l.name
+      lines.push(`${i + 1}. (${l.number}) ${prod} — ${l.quantity ?? '—'} ${l.unit || ''} · ${l.sum != null ? fmtSum(l.sum) : '—'}`)
+      continue
+    }
     lines.push('', `— Лот ${i + 1} (${l.number}): ${l.name || ''}`)
     lines.push(`ТОЧНЫЙ ТОВАР: ${l.exact_product?.length ? l.exact_product.join('; ') : [l.name, l.brief].filter(Boolean).join(', ')}`)
     if (l.oktru_category) lines.push(`Категория ОКТРУ: ${l.oktru_category}`)
@@ -223,7 +235,7 @@ function describeTender(t) {
 // Необязательно: если задан ключ Anthropic, ИИ определяет точный товар по спецификации.
 async function identifyProduct(t) {
   if (!ANTHROPIC_KEY) return ''
-  const lots = (t.lots || []).slice(0, 5).map(l => ({
+  const lots = (t.lots || []).slice(0, LOTS_FULL).map(l => ({
     lot: l.number,
     name: l.name,
     exact_product_from_portal: l.exact_product,
@@ -283,7 +295,7 @@ async function sendDetails(targets, ids) {
     for (const id of targets) {
       await sendText(id, describeTender(t)).catch(e => console.error('[tenders]', e.message))
       if (ai) await sendText(id, ai).catch(() => {})
-      for (const l of (t.lots || []).slice(0, 5)) {
+      for (const l of (t.lots || []).slice(0, PDF_MAX)) {
         if (l.spec_pdf) await sendDocument(id, l.spec_pdf, `Техническая спецификация, лот ${l.number}`).catch(e => console.error('[tenders]', e.message))
       }
     }

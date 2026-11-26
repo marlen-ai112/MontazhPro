@@ -27,6 +27,7 @@ from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
 CARD_URL = "https://zakup.sk.kz/#/ext(popup:item/{id}/advert)?tabs=advert"
+MAX_LOT_PAGES = 10  # не больше 100 лотов на закупку
 FILE_URL = "/eprocfilestorage/open-api/files/download/"
 
 FETCH_JS = """async (u) => {
@@ -116,7 +117,34 @@ def one_tender(page, tid, timeout_s, out_dir):
     if st != 200:
         res["error"] = f"Портал вернул HTTP {st}"
         return res
-    lots = r.json()
+    lots = list(r.json())
+    try:
+        total = int(r.headers.get("x-total-count", len(lots)))
+    except ValueError:
+        total = len(lots)
+    # Портал показывает лоты по 10 на странице: листаем кнопкой «следующая страница», как человек.
+    pages = 1
+    while len(lots) < total and pages < MAX_LOT_PAGES:
+        nxt = page.locator(".m-modal__pagination a[aria-label='Next']").first
+        try:
+            with page.expect_response(lambda x: f"/4dv3rts/lots/{tid}" in x.url, timeout=timeout_s * 1000) as info:
+                nxt.click(timeout=10000)
+            more = info.value
+            if more.status != 200:
+                res["lots_warning"] = f"Страница лотов {pages + 1}: HTTP {more.status}"
+                break
+            chunk = more.json()
+        except Exception as exc:
+            res["lots_warning"] = f"Не удалось перейти на страницу лотов {pages + 1}: {str(exc)[:120]}"
+            break
+        if not chunk:
+            break
+        lots.extend(chunk)
+        pages += 1
+        page.wait_for_timeout(700)
+    res["lots_total"] = total
+    if len(lots) < total and "lots_warning" not in res:
+        res["lots_warning"] = f"Получено лотов {len(lots)} из {total}"
     advert = holder["advert"][1].json() if "advert" in holder and holder["advert"][0] == 200 else {}
     customer = (advert.get("customer") or {})
     res.update(
