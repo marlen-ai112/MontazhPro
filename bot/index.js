@@ -29,7 +29,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { track, pushFeed, agents } from './office.js'
 import { startApi } from './api.js'
-import { makeReels, parseCaption, sttConfigured } from './reels.js'
+import { makeReels, parseCaption, sttConfigured, describeResult } from './reels.js'
 import { spawnSync } from 'node:child_process'
 
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN
@@ -720,10 +720,7 @@ function processVideo(chatId, file, captionText) {
     await say(`Принял видео. Монтирую: ${opts.cuts ? 'режу паузы, ' : ''}вертикальный кадр 9:16, стиль «${({ sharp: 'резкий яркий', cinema: 'кино', warm: 'тёплый', bw: 'чёрно-белый' })[opts.style]}»${opts.title ? `, заголовок «${opts.title}»` : ''}. Это займёт 1–3 минуты…`)
     try {
       const { file: out, info } = await track('video', 'Монтирую рилс', makeReels(file, { ...opts, workDir: path.join(VIDEO_IN, `work_${Date.now()}`), out: path.join(VIDEO_OUT, `reels_${Date.now()}.mp4`) }))
-      const subs = info.subtitles === 'ok' ? `субтитры: ${opts.subtitles ? 'есть' : 'нет'}`
-        : info.subtitles === 'no_key' ? 'субтитры не добавлены (на сервере не установлено распознавание речи faster-whisper и нет ключа STT_API_KEY)'
-        : info.subtitles === 'off' ? 'без субтитров' : `субтитры: ${info.subtitles}`
-      const text = `✅ Рилс готов: ${info.resultSec} с (было ${info.sourceSec} с), ${info.segments} фрагм., ${info.cutSilence ? 'паузы вырезаны' : 'без вырезания пауз'}, стиль «${info.style}», ${info.title ? 'заголовок есть' : 'без заголовка'}, ${subs}. ${info.sizeMb} МБ.`
+      const text = describeResult(info)
       for (const id of targets) {
         if (id === 'app') pushFeed('video', text, { name: path.basename(out), url: `/files/${encodeURIComponent(path.basename(out))}` })
         else {

@@ -36,8 +36,14 @@ def main():
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
         condition_on_previous_text=False,
+        word_timestamps=True,  # время каждого слова: для подписей с подсветкой слов
     )
-    out = [{"start": float(s.start), "end": float(s.end), "text": s.text.strip()} for s in segments if s.text.strip()]
+    out = []
+    for s in segments:
+        if not s.text.strip():
+            continue
+        words = [{"start": float(w.start), "end": float(w.end), "text": w.word.strip()} for w in (getattr(s, "words", None) or []) if w.word.strip()]
+        out.append({"start": float(s.start), "end": float(s.end), "text": s.text.strip(), "words": words})
     json.dump(out, sys.stdout, ensure_ascii=False)
 
 

@@ -157,13 +157,129 @@ async function transcribe(file, dir) {
   form.append('file', new Blob([fs.readFileSync(audio)], { type: 'audio/mpeg' }), 'audio.mp3')
   form.append('model', process.env.STT_MODEL || 'whisper-1')
   form.append('response_format', 'verbose_json')
+  form.append('timestamp_granularities[]', 'word')
+  form.append('timestamp_granularities[]', 'segment')
   const lang = process.env.STT_LANGUAGE === undefined ? 'ru' : process.env.STT_LANGUAGE
   if (lang) form.append('language', lang)
   const base = (process.env.STT_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '')
   const res = await fetch(`${base}/audio/transcriptions`, { method: 'POST', headers: { authorization: `Bearer ${process.env.STT_API_KEY}` }, body: form })
   if (!res.ok) throw new Error(`распознавание речи: HTTP ${res.status}`)
   const data = await res.json()
-  return (data.segments || []).map(s => ({ start: Number(s.start), end: Number(s.end), text: String(s.text || '').trim() })).filter(s => s.text && s.end > s.start)
+  const allWords = (data.words || []).map(w => ({ start: Number(w.start), end: Number(w.end), text: String(w.word || w.text || '').trim() })).filter(w => w.text)
+  return (data.segments || [])
+    .map(s => ({ start: Number(s.start), end: Number(s.end), text: String(s.text || '').trim(), words: allWords.filter(w => w.start >= Number(s.start) - 0.05 && w.start < Number(s.end)) }))
+    .filter(s => s.text && s.end > s.start)
+}
+
+// ---- Подписи по словам (ASS): текущее слово подсвечивается, как в роликах топовых авторов -----------------
+const assTime = t => {
+  const h = Math.floor(t / 3600)
+  const m = Math.floor((t % 3600) / 60)
+  return `${h}:${String(m).padStart(2, '0')}:${(t % 60).toFixed(2).padStart(5, '0')}`
+}
+const assSafe = x => String(x).replace(/[{}\\]/g, '').toUpperCase()
+
+// Слова исходника -> слова на смонтированной дорожке (вырезанные участки пропускаются).
+function mapWords(parts, segs) {
+  const out = []
+  for (const p of parts) {
+    for (const w of p.words || []) {
+      const a = mapTime(w.start + 0.005, segs)
+      if (a === null) continue
+      let b = mapTime(Math.max(w.start + 0.02, w.end - 0.005), segs)
+      if (b === null || b <= a) b = a + 0.12
+      out.push({ start: a, end: b, text: w.text })
+    }
+  }
+  return out.sort((x, y) => x.start - y.start)
+}
+
+// Группировка слов в строки: конец предложения, пауза, не больше 4 слов и около 22 знаков.
+function groupWords(words, maxChars = 22) {
+  const lines = []
+  let cur = []
+  for (const w of words) {
+    const prev = cur[cur.length - 1]
+    const chars = cur.reduce((n, x) => n + x.text.length + 1, 0) + w.text.length
+    if (prev && (/[.!?…]$/.test(prev.text) || w.start - prev.end > 0.45 || cur.length >= 4 || chars > maxChars)) { lines.push(cur); cur = [] }
+    cur.push(w)
+  }
+  if (cur.length) lines.push(cur)
+  return lines
+}
+
+function buildAss(lines) {
+  const size = Math.round(W * 0.07)
+  const head = `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${W}
+PlayResY: ${H}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Word,DejaVu Sans,${size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,${Math.round(size * 0.1)},3,2,${Math.round(W * 0.06)},${Math.round(W * 0.06)},${Math.round(H * 0.22)},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`
+  const ev = []
+  lines.forEach((line, li) => {
+    const nextLineStart = lines[li + 1]?.[0]?.start ?? Infinity
+    line.forEach((w, i) => {
+      const start = w.start
+      const end = i + 1 < line.length ? line[i + 1].start : Math.min(w.end + 0.35, nextLineStart)
+      if (end <= start) return
+      const text = line.map((x, j) => (j === i ? `{\\c&H00D4FF&\\fscx112\\fscy112}${assSafe(x.text)}{\\r}` : assSafe(x.text))).join(' ')
+      ev.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Word,,0,0,0,,${text}`)
+    })
+  })
+  return head + ev.join('\n') + '\n'
+}
+
+// ---- Кадрирование по лицу (горизонтальное видео -> вертикальное) ---------------------------------------
+// Для каждого фрагмента ищем лицо и ставим кадр так, чтобы говорящий оказался в центре. Нужен opencv (python), иначе кадр по центру.
+let cvOk
+function faceTrackAvailable() {
+  if (process.env.REELS_FACE === '0') return false
+  if (cvOk === undefined) cvOk = spawnSync(PYTHON, ['-c', 'import cv2'], { stdio: 'ignore' }).status === 0
+  return cvOk
+}
+async function faceCenters(input, segs, info) {
+  const none = segs.map(() => null)
+  if (info.width / info.height < 0.8) return none // вертикальное видео не режем
+  if (process.env.REELS_FACE_STUB) return segs.map(() => Number(process.env.REELS_FACE_STUB)) // только для проверок
+  if (!faceTrackAvailable()) return none
+  const times = segs.flatMap(([a, b]) => [a + (b - a) * 0.25, a + (b - a) * 0.5, a + (b - a) * 0.75])
+  let found
+  try {
+    const { out } = await run(PYTHON, [path.join(HERE, 'face_center.py'), input, ...times.map(t => t.toFixed(2))])
+    found = JSON.parse(out || '[]')
+  } catch {
+    return none
+  }
+  const med = a => { const v = a.filter(x => typeof x === 'number').sort((p, q) => p - q); return v.length ? v[Math.floor(v.length / 2)] : null }
+  const per = segs.map((_, i) => med(found.slice(i * 3, i * 3 + 3)))
+  let last = med(per)
+  return per.map(c => { if (c !== null) last = c; return c ?? last })
+}
+
+async function qualityCheck(file) {
+  const p = await probe(file)
+  let mean = null
+  let max = null
+  try {
+    const { err } = await run('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vn', '-af', 'volumedetect', '-f', 'null', '-']).catch(e => ({ err: e.message }))
+    mean = Number(err.match(/mean_volume: (-?[\d.]+) dB/)?.[1])
+    max = Number(err.match(/max_volume: (-?[\d.]+) dB/)?.[1])
+  } catch { /* без измерения громкости */ }
+  const warn = []
+  if (p.hasAudio && Number.isFinite(max) && max > -0.3) warn.push('возможны перегрузки звука')
+  if (p.hasAudio && Number.isFinite(mean) && mean < -30) warn.push('звук очень тихий')
+  if (!p.hasAudio) warn.push('нет звука')
+  if (p.duration < 1) warn.push('ролик слишком короткий')
+  return { width: p.width, height: p.height, duration: Math.round(p.duration * 10) / 10, hasAudio: p.hasAudio, mean: Number.isFinite(mean) ? mean : null, warn }
 }
 
 function wrapText(text, width) {
@@ -195,23 +311,29 @@ export async function makeReels(input, opts = {}) {
 
   // 2. Субтитры (если есть ключ): распознаём исходное аудио и переносим время на смонтированную дорожку
   let cues = []
+  let words = []
   let subStatus = 'off'
   if (subtitles && info.hasAudio) {
     if (!sttConfigured()) subStatus = 'no_key'
     else {
       try {
         const parts = await transcribe(input, dir)
+        words = mapWords(parts, segs)
         for (const p of parts) {
           const a = mapTime(p.start + 0.02, segs)
           const b = mapTime(Math.max(p.start + 0.05, p.end - 0.02), segs)
           if (a !== null && b !== null && b > a) cues.push({ start: a, end: b, text: p.text })
         }
-        subStatus = cues.length ? 'ok' : 'no_speech'
+        subStatus = words.length || cues.length ? 'ok' : 'no_speech'
       } catch (e) {
         subStatus = `error: ${e.message}`
       }
     }
   }
+
+  // 2б. Где лицо говорящего (для умного кадра 9:16)
+  const faces = await faceCenters(input, segs, info)
+  const scaledW = Math.round((info.width * H) / info.height / 2) * 2
 
   // 3. Граф фильтров: каждый участок = отдельный вход со своим -ss/-t (память не раздувается)
   const args = ['-y', '-hide_banner', '-loglevel', 'error']
@@ -221,7 +343,11 @@ export async function makeReels(input, opts = {}) {
   const al = []
   segs.forEach((_, i) => {
     const zoom = i % 2 === 1 ? `,scale=${Math.round(W * 1.1)}:${Math.round(H * 1.1)},crop=${W}:${H}` : ''
-    g += `[${i}:v]fps=30,scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}${zoom},setsar=1[v${i}];`
+    const cx = faces[i]
+    const fit = cx !== null && scaledW > W
+      ? `scale=${scaledW}:${H},crop=${W}:${H}:${Math.max(0, Math.min(scaledW - W, Math.round(cx * scaledW - W / 2)))}:0`
+      : `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`
+    g += `[${i}:v]fps=30,${fit}${zoom},setsar=1[v${i}];`
     vl.push(`[v${i}]`)
     if (info.hasAudio) {
       g += `[${i}:a]aresample=48000,aformat=channel_layouts=stereo[a${i}];`
@@ -233,7 +359,9 @@ export async function makeReels(input, opts = {}) {
     : vl.join('') + `concat=n=${segs.length}:v=1:a=0[cv];`
 
   // нормализация громкости (для соцсетей) и цветокоррекция
-  if (info.hasAudio) g += '[ca]loudnorm=I=-14:TP=-1.5:LRA=11[la];'
+  // голос: срезаем гул, подавляем шум, выравниваем динамику, затем громкость под соцсети. REELS_DENOISE=0 выключает шумоподавление.
+  const denoise = process.env.REELS_DENOISE === '0' ? '' : 'afftdn=nf=-28,'
+  if (info.hasAudio) g += `[ca]highpass=f=70,${denoise}acompressor=threshold=0.125:ratio=3:attack=5:release=80:makeup=2,loudnorm=I=-14:TP=-1.5:LRA=11[la];`
   g += `[cv]${st.vf},format=yuv420p[g0];`
   let cur = 'g0'
 
@@ -246,7 +374,14 @@ export async function makeReels(input, opts = {}) {
       `alpha='if(lt(t,0.3),t/0.3,if(gt(t,2.6),max(0,(3.0-t)/0.4),1))':enable='lt(t,3.0)'[t0];`
     cur = 't0'
   }
-  // субтитры: крупно, белым с чёрной обводкой, в нижней трети
+  // подписи по словам (ASS): подсвечивается слово, которое сейчас звучит
+  if (words.length) {
+    const ass = path.join(dir, 'words.ass')
+    fs.writeFileSync(ass, buildAss(groupWords(words)), 'utf8')
+    g += `[${cur}]subtitles='${fp(ass)}':fontsdir='${fp(path.dirname(FONT))}'[sw];`
+    cur = 'sw'
+  } else
+  // запасной вариант без точных времён слов: целые фразы
   cues.forEach((c, i) => {
     const sf = path.join(dir, `sub${i}.txt`)
     fs.writeFileSync(sf, wrapText(c.text, 22), 'utf8')
@@ -269,17 +404,42 @@ export async function makeReels(input, opts = {}) {
   // Telegram принимает файлы до 50 МБ: если больше, пережимаем сильнее.
   if (fs.statSync(out).size > 48 * 1024 * 1024) await run('ffmpeg', encode(29))
 
+  const qa = await qualityCheck(out)
   return {
     file: out,
     info: {
+      qa,
+      faceTracked: faces.filter(c => c !== null).length,
+      captions: words.length ? 'по словам' : cues.length ? 'фразами' : 'нет',
       sourceSec: Math.round(info.duration),
       resultSec: Math.round(total),
       segments: segs.length,
       cutSilence: auto.length > 1 && cuts,
       style: st.label,
       title: Boolean(title),
-      subtitles: subStatus === 'ok' ? cues.length : subStatus,
+      subtitles: subStatus === 'ok' ? words.length || cues.length : subStatus,
       sizeMb: Math.round((fs.statSync(out).size / 1024 / 1024) * 10) / 10,
     },
   }
+}
+
+// Текст отчёта о готовом ролике (для основного бота и бота-монтажёра).
+export function describeResult(info, opts = {}) {
+  const subs =
+    info.subtitles === 'off' ? 'без подписей'
+    : info.subtitles === 'no_key' ? 'подписи не добавлены (на сервере нет распознавания речи)'
+    : typeof info.subtitles === 'number' ? `подписи ${info.captions} (${info.subtitles})`
+    : `подписи: ${info.subtitles}`
+  const qa = info.qa || {}
+  const check = [
+    `${qa.width}×${qa.height}, ${String(qa.duration).replace('.', ',')} с`,
+    qa.hasAudio ? `звук ок${qa.mean !== null && qa.mean !== undefined ? `, средняя громкость ${qa.mean} дБ` : ''}` : 'без звука',
+  ]
+  if (qa.warn?.length) check.push(`⚠ ${qa.warn.join(', ')}`)
+  return [
+    `✅ Рилс готов: ${info.resultSec} с (было ${info.sourceSec} с), ${info.segments} фрагм., ${info.cutSilence ? 'паузы вырезаны' : 'без вырезания пауз'}.`,
+    `Стиль «${info.style}», ${info.title ? 'заголовок есть' : 'без заголовка'}, ${subs}.`,
+    `Кадр: ${info.faceTracked ? `по лицу (${info.faceTracked} фрагм.)` : 'по центру'}. Звук очищен и выровнен.`,
+    `Проверка: ${check.join(', ')}. ${info.sizeMb} МБ.`,
+  ].join('\n')
 }
