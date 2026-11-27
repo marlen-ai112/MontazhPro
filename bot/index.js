@@ -235,7 +235,7 @@ function describeTender(t) {
       continue
     }
     lines.push('', `— Лот ${i + 1} (${l.number}): ${l.name || ''}`)
-    lines.push(`ТОЧНЫЙ ТОВАР: ${l.exact_product?.length ? l.exact_product.join('; ') : [l.name, l.brief].filter(Boolean).join(', ')}`)
+    lines.push(`ТОЧНЫЙ ТОВАР: ${l.exact_product?.length ? l.exact_product.map(x => x.trim()).join('; ') : [l.name, l.brief].filter(Boolean).join(', ')}`)
     if (l.oktru_category) lines.push(`Категория ОКТРУ: ${l.oktru_category}`)
     lines.push(`Количество: ${l.quantity ?? '—'} ${l.unit || ''} · цена за ед. ${l.price_per_unit != null ? fmtSum(l.price_per_unit) : '—'} · всего ${l.sum != null ? fmtSum(l.sum) : '—'}`)
     if (l.delivery) lines.push(`Доставка: ${l.delivery}${l.duration ? ` (срок: ${l.duration})` : ''}`)

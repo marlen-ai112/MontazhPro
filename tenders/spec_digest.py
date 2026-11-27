@@ -145,10 +145,23 @@ def digest_pdf(path):
     desc = ""
     m = re.search(r"Описание и требуемые[^\n]*\n", text)
     if m:
-        desc = _clean(text[m.end():])[:700]
+        desc = _clean(text[m.end():])[:1800]
     product = guess_product(summary, text, paras)
     return {"summary": summary, "params": params, "notes": notes, "desc": desc, "product": product,
             "text": re.sub(r"\n{3,}", "\n\n", text).strip()[:9000], "pages": len(doc), "ru_from_page": start + 1}
+
+
+def _desc_lines(desc, limit=1200):
+    """Описание текстом: без обрамляющих кавычек, пункты «1) … 2) …» построчно, обрезка по концу предложения."""
+    t = desc.strip().strip('"«»').strip()
+    t = re.sub(r"\s+(?=\d{1,2}\)\s)", "\n", t)  # новая строка перед «2) »
+    t = re.sub(r"(?<=[.;])\s+(?=\d{1,2}\.\s)", "\n", t)  # и перед «6. »
+    t = re.sub(r"(\w)-\s+(\w)", r"\1\2", t)  # перенос «ти-па» -> «типа»
+    if len(t) > limit:
+        cut = t[:limit]
+        end = max(cut.rfind(". "), cut.rfind("; "), cut.rfind("\n"))
+        t = (cut[: end + 1] if end > limit // 2 else cut.rsplit(" ", 1)[0]) + "\n… (полностью в PDF)"
+    return [x.strip() for x in t.split("\n") if x.strip()]
 
 
 def format_digest(d, max_params=12):
@@ -165,9 +178,11 @@ def format_digest(d, max_params=12):
     if cond:
         out.append("Условия поставки: " + "; ".join(cond))
     params = d.get("params", [])
+    desc_lines = []
     if not params and d.get("desc"):
+        desc_lines = _desc_lines(d["desc"])
         out.append("Описание и требования (текстом):")
-        out.append("  " + d["desc"])
+        out += ["  " + x for x in desc_lines]
     if params:
         out.append(f"Требования к товару ({len(params)}):")
         for p in params[:max_params]:
@@ -176,6 +191,10 @@ def format_digest(d, max_params=12):
             out.append(f"  … ещё {len(params) - max_params} в PDF")
     labels = {k: lbl for k, lbl, _ in NOTE_RULES}
     notes = d.get("notes", {})
+    # то, что уже напечатано в описании, не повторяем
+    shown_text = " ".join(desc_lines)
+    notes = {k: [x for x in v if _clean(x).strip(' "«»')[:50] not in shown_text] for k, v in notes.items()}
+    notes = {k: v for k, v in notes.items() if v}
     shown = [k for k, _l, _r in NOTE_RULES if k in notes]
     if shown:
         out.append("Что отмечено в тексте спецификации:")
