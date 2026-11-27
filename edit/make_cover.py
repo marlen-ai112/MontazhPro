@@ -69,8 +69,8 @@ lines = [a.h1, a.h2]
 fsz = min(fit(l, 940, 230).size for l in lines)   # одинаковый размер строк
 f = font(fsz)
 for i, line in enumerate(lines):
-    block = fsz * (0.94 * (len(lines) - 1) + 1)
-    y = int(1200 + max(0, (440 - block) / 2) + i * fsz * 0.94)
+    block = fsz * (1.0 * (len(lines) - 1) + 1)
+    y = int(1200 + max(0, (440 - block) / 2) + i * fsz * 1.0)
     # тень для читаемости
     d.text((cx - f.getlength(line) / 2 + 5, y + 6), line, font=f, fill=(0, 0, 0))
     centered(line, y, f, (255, 255, 255))
