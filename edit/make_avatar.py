@@ -10,7 +10,7 @@ from mediapipe.tasks.python import vision
 ap = argparse.ArgumentParser()
 ap.add_argument("video"); ap.add_argument("dst"); ap.add_argument("--t", type=float, required=True)
 ap.add_argument("--zoom", type=float, default=2.3, help="сторона кропа = zoom * ширина лица")
-ap.add_argument("--blur", type=float, default=14); ap.add_argument("--no-bg", action="store_true")
+ap.add_argument("--dy", type=float, default=0.06, help="сдвиг центра кропа вниз, доли высоты лица"); ap.add_argument("--blur", type=float, default=14); ap.add_argument("--no-bg", action="store_true")
 a = ap.parse_args()
 raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(a.t), "-i", a.video, "-frames:v", "1",
                       "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True, check=True).stdout
@@ -36,7 +36,7 @@ fc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_defa
 fs = fc.detectMultiScale(cv2.cvtColor(sm, cv2.COLOR_BGR2GRAY), 1.1, 6, minSize=(60, 60))
 if len(fs) == 0: raise SystemExit("лицо не найдено")
 x, y, w_, h_ = max(fs, key=lambda b: b[2]); x, y, w_, h_ = [v / sc for v in (x, y, w_, h_)]
-side = int(min(w_ * a.zoom, W, H)); cx, cy = x + w_ / 2, y + h_ / 2 + h_ * 0.06
+side = int(min(w_ * a.zoom, W, H)); cx, cy = x + w_ / 2, y + h_ / 2 + h_ * a.dy
 x0 = int(min(max(cx - side / 2, 0), W - side)); y0 = int(min(max(cy - side / 2, 0), H - side))
 out = cv2.resize(fr[y0:y0 + side, x0:x0 + side], (1080, 1080), interpolation=cv2.INTER_LANCZOS4)
 os.makedirs(os.path.dirname(os.path.abspath(a.dst)), exist_ok=True)
