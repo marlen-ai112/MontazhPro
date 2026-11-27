@@ -8,6 +8,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 ap = argparse.ArgumentParser()
 ap.add_argument("video"); ap.add_argument("dst"); ap.add_argument("--t", type=float, default=44)
+ap.add_argument("--top", default="ХОТЕЛИ ПРОДАТЬ ЗА 250 000 ₸", help="плашка сверху")
+ap.add_argument("--strike", type=int, default=1, help="зачеркнуть текст верхней плашки")
+ap.add_argument("--h1", default="ИИ-ОФИС"); ap.add_argument("--h2", default="ЗА НЕДЕЛЮ")
+ap.add_argument("--pill", default="сам ищет тендеры")
+ap.add_argument("--cta", default="ПОКАЖУ, КАК ЭТО РАБОТАЕТ  →")
 a = ap.parse_args()
 W, H = 1080, 1920
 png = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(a.t), "-i", a.video, "-frames:v", "1",
@@ -48,7 +53,7 @@ def centered(text, y, f, fill):
     w = f.getlength(text); d.text((cx - w / 2, y), text, font=f, fill=fill); return w
 
 # 1) зачёркнутая цена - плашка сверху (на спокойной стене)
-txt = "ХОТЕЛИ ПРОДАТЬ ЗА 250 000 ₸"
+txt = a.top
 f1 = fit(txt, 800, 58)
 w = f1.getlength(txt)
 ov = Image.new("RGBA", (W, H), (0, 0, 0, 0)); od = ImageDraw.Draw(ov)
@@ -56,25 +61,28 @@ od.rounded_rectangle([cx - w / 2 - 36, 250, cx + w / 2 + 36, 250 + f1.size + 44]
 img = Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB"); d = ImageDraw.Draw(img)
 centered(txt, 250 + 20, f1, (255, 255, 255))
 yl = 250 + 20 + f1.size * 0.62
-d.line([(cx - w / 2, yl), (cx + w / 2, yl)], fill=PINK, width=8)
+if a.strike: d.line([(cx - w / 2, yl), (cx + w / 2, yl)], fill=PINK, width=8)
 
 # 2) главный заголовок
-for i, line in enumerate(["ИИ-ОФИС", "ЗА НЕДЕЛЮ"]):
-    f = fit(line, 940, 230)
-    y = 1215 + i * 215
+lines = [a.h1, a.h2]
+fsz = min(fit(l, 940, 230).size for l in lines)   # одинаковый размер строк
+f = font(fsz)
+for i, line in enumerate(lines):
+    block = fsz * (0.94 * (len(lines) - 1) + 1)
+    y = int(1200 + max(0, (440 - block) / 2) + i * fsz * 0.94)
     # тень для читаемости
     d.text((cx - f.getlength(line) / 2 + 5, y + 6), line, font=f, fill=(0, 0, 0))
     centered(line, y, f, (255, 255, 255))
 
 # 3) розовая плашка
-f3 = fit("сам ищет тендеры", 780, 78)
-t3 = "сам ищет тендеры"; w3 = f3.getlength(t3)
+t3 = a.pill
+f3 = fit(t3, 900, 78); w3 = f3.getlength(t3)
 px, py, ph = cx - w3 / 2 - 40, 1655, f3.size + 44
 d.rounded_rectangle([px, py, px + w3 + 80, py + ph], radius=26, fill=PINK)
 d.text((cx - w3 / 2, py + 12), t3, font=f3, fill=(255, 255, 255))
 
 # 4) призыв внизу (вне безопасной зоны сетки, но видно в ленте)
-f4 = font(46); t4 = "ПОКАЖУ, КАК ЭТО РАБОТАЕТ  →"
+f4 = font(46); t4 = a.cta
 centered(t4, 1808, f4, (255, 255, 255))
 img.save(a.dst)
 img.convert("RGB").save(a.dst.rsplit(".", 1)[0] + ".jpg", quality=94)
