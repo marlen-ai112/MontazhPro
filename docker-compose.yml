@@ -1,0 +1,29 @@
+# Запуск бота закупок на сервере:
+#   1. Скопируйте bot/env.docker.example в .env.bot и впишите токен и chat id.
+#   2. docker compose up -d --build
+#   3. Логи: docker compose logs -f bot
+services:
+  bot:
+    build: .
+    image: montazhpro-bot
+    restart: unless-stopped
+    env_file: .env.bot
+    ipc: host # рекомендуется для Chromium в Docker
+    ports:
+      - "8787:8787" # приложение AI-офис (нужен APP_KEY в .env.bot)
+    volumes:
+      - bot-state:/app/bot/.state # запоминает уже отправленные закупки между перезапусками
+
+  # Отдельный бот-монтажёр рилс (нужен VIDEO_BOT_TOKEN в .env.bot; без него просто простаивает)
+  video-bot:
+    image: montazhpro-bot
+    depends_on: [bot]
+    command: ["node", "bot/video-bot.js"]
+    restart: unless-stopped
+    env_file: .env.bot
+    ipc: host
+    volumes:
+      - bot-state:/app/bot/.state
+
+volumes:
+  bot-state:

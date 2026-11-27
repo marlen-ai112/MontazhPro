@@ -4,6 +4,11 @@ export default defineNuxtConfig({
   css: ["~/assets/style/main.css"],
   devtools: { enabled: false },
   ssr: true,
+  // Серверные секреты: значения берутся из переменных окружения NUXT_ANTHROPIC_API_KEY и NUXT_AGENT_MODEL
+  runtimeConfig: {
+    anthropicApiKey: '',
+    agentModel: 'claude-sonnet-5-5',
+  },
   app: {
     head: {
       link: [

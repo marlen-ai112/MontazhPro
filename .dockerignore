@@ -1,0 +1,16 @@
+node_modules
+.git
+.nuxt
+.output
+.env
+.env.*
+bot/env.bat
+bot/.state
+video
+video-bot
+n8n
+pages
+components
+server
+public
+assets

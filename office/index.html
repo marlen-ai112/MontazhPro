@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AI-офис">
+<meta name="theme-color" content="#0e1420">
+<title>AI-офис</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="stage">
+  <div class="phone" id="phone">
+    <div class="notch" aria-hidden="true"></div>
+    <div class="status" aria-hidden="true"><span id="clock">9:41</span><span class="status-title">AI-офис</span><span id="battery">▮▮▮ 100%</span></div>
+
+    <div class="office"><canvas id="c" width="360" height="324"></canvas></div>
+
+    <div class="roster" id="roster" role="list"></div>
+
+    <section class="cmd" aria-label="Командный пункт">
+      <header class="cmd-head"><b>Командный пункт</b><span id="conn" class="conn">…</span></header>
+      <div class="feed" id="feed" aria-live="polite"></div>
+      <div class="chips" id="chips"></div>
+      <form class="input" id="form" autocomplete="off">
+        <button type="button" id="attach" class="attach" aria-label="Загрузить видео на монтаж или PDF на разбор" title="Видео на монтаж или PDF на разбор">📎</button>
+        <input id="file" type="file" accept="video/*,application/pdf,.pdf" hidden>
+        <input id="inp" type="text" placeholder="Команда или вопрос…" enterkeyhint="send" maxlength="500">
+        <button type="submit" aria-label="Отправить">➤</button>
+      </form>
+    </section>
+
+    <div class="login hidden" id="login">
+      <form id="loginForm" class="login-card">
+        <h2>Вход в AI-офис</h2>
+        <p>Введите ключ доступа. Он задаётся на сервере в переменной <code>APP_KEY</code>.</p>
+        <input id="keyInp" type="password" placeholder="Ключ доступа" autocomplete="current-password">
+        <button type="submit" class="primary">Войти</button>
+        <button type="button" id="demoBtn" class="ghost">Посмотреть демо</button>
+        <p class="err" id="loginErr"></p>
+      </form>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
