@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
 ap = argparse.ArgumentParser()
 ap.add_argument("video"); ap.add_argument("dst"); ap.add_argument("--t", type=float, default=44)
+ap.add_argument("--scale", type=float, default=1.06); ap.add_argument("--dy", type=int, default=110)
 ap.add_argument("--top", default="ХОТЕЛИ ПРОДАТЬ ЗА 250 000 ₸", help="плашка сверху")
 ap.add_argument("--strike", type=int, default=1, help="зачеркнуть текст верхней плашки")
 ap.add_argument("--h1", default="ИИ-ОФИС"); ap.add_argument("--h2", default="ЗА НЕДЕЛЮ")
@@ -19,7 +20,7 @@ png = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(a.t), "-i", a.video, "
                       "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True, check=True).stdout
 img = Image.open(io.BytesIO(png)).convert("RGB")
 # чуть крупнее и выше: лицо уходит от текстового блока
-S, DY = 1.06, 110
+S, DY = a.scale, a.dy
 img = img.resize((int(W * S), int(H * S)), Image.LANCZOS)
 ox = (img.width - W) // 2
 img = img.crop((ox, DY, ox + W, DY + H))
