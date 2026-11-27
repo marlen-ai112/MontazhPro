@@ -659,7 +659,7 @@ function processVideo(chatId, file, captionText) {
     try {
       const { file: out, info } = await track('video', 'Монтирую рилс', makeReels(file, { ...opts, workDir: path.join(VIDEO_IN, `work_${Date.now()}`), out: path.join(VIDEO_OUT, `reels_${Date.now()}.mp4`) }))
       const subs = info.subtitles === 'ok' ? `субтитры: ${opts.subtitles ? 'есть' : 'нет'}`
-        : info.subtitles === 'no_key' ? 'субтитры не добавлены (нет ключа распознавания речи STT_API_KEY)'
+        : info.subtitles === 'no_key' ? 'субтитры не добавлены (на сервере не установлено распознавание речи faster-whisper и нет ключа STT_API_KEY)'
         : info.subtitles === 'off' ? 'без субтитров' : `субтитры: ${info.subtitles}`
       const text = `✅ Рилс готов: ${info.resultSec} с (было ${info.sourceSec} с), ${info.segments} фрагм., ${info.cutSilence ? 'паузы вырезаны' : 'без вырезания пауз'}, стиль «${info.style}», ${info.title ? 'заголовок есть' : 'без заголовка'}, ${subs}. ${info.sizeMb} МБ.`
       for (const id of targets) {

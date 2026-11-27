@@ -7,12 +7,14 @@
 //   REELS_CRF=21          качество (меньше = лучше и тяжелее)
 //   FONT=...              путь к жирному шрифту (по умолчанию DejaVu Sans Bold, там есть кириллица)
 //   STT_API_KEY, STT_BASE_URL, STT_MODEL, STT_LANGUAGE  распознавание речи (Whisper-совместимый API, например Groq)
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const W = 1080
-const H = 1920
+// Размер кадра: REELS_WIDTH=1080 (по умолчанию) или 720 — на слабом сервере монтаж заметно быстрее.
+const W = Number(process.env.REELS_WIDTH || 1080)
+const H = Math.round((W * 16) / 9 / 2) * 2
 const MAX_SEC = Number(process.env.REELS_MAX_SEC || 90)
 const CRF = Number(process.env.REELS_CRF || 21)
 const FONT = process.env.FONT || '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
@@ -116,11 +118,41 @@ function mapTime(t, segs) {
 }
 
 // ---- Субтитры по речи (необязательно) ---------------------------------------------------
-export const sttConfigured = () => Boolean(process.env.STT_API_KEY)
+// Распознавание речи: облачное (STT_API_KEY, Whisper-совместимый API) или на самом сервере (faster-whisper, без ключа).
+// STT_LOCAL=0 выключает локальное; STT_LOCAL_MODEL=tiny|base|small (base по умолчанию); STT_THREADS=1 — потоки процессора.
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const PYTHON = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3')
+let localOk
+function localSttAvailable() {
+  if (process.env.STT_LOCAL === '0') return false
+  if (localOk === undefined) localOk = spawnSync(PYTHON, ['-c', 'import faster_whisper'], { stdio: 'ignore' }).status === 0
+  return localOk
+}
+export const sttConfigured = () => Boolean(process.env.STT_API_KEY) || localSttAvailable()
+
+async function transcribeLocal(audio) {
+  const args = [path.join(HERE, 'stt_local.py'), audio]
+  // Первый запуск скачивает модель (разово), поэтому ожидание большое.
+  const { out } = await new Promise((resolve, reject) => {
+    const p = spawn(PYTHON, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let o = ''
+    let e = ''
+    const timer = setTimeout(() => p.kill(), 10 * 60 * 1000)
+    p.stdout.on('data', d => (o += d))
+    p.stderr.on('data', d => (e += d))
+    p.on('error', reject)
+    p.on('close', code => {
+      clearTimeout(timer)
+      code === 0 ? resolve({ out: o }) : reject(new Error(`локальное распознавание речи: ${e.trim().split('\n').slice(-2).join(' ').slice(0, 300) || `код ${code}`}`))
+    })
+  })
+  return JSON.parse(out || '[]').filter(s => s.text && s.end > s.start)
+}
 
 async function transcribe(file, dir) {
   const audio = path.join(dir, 'speech.mp3')
   await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', file, '-t', String(MAX_SEC), '-vn', '-ac', '1', '-ar', '16000', '-b:a', '48k', audio])
+  if (!process.env.STT_API_KEY) return transcribeLocal(audio)
   const form = new FormData()
   form.append('file', new Blob([fs.readFileSync(audio)], { type: 'audio/mpeg' }), 'audio.mp3')
   form.append('model', process.env.STT_MODEL || 'whisper-1')
