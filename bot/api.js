@@ -104,7 +104,7 @@ export function startApi({ key, port, officeDir, specsDir, videoOutDir, videoInD
       if (!onVideo || !videoInDir) return send(404, { error: 'video disabled' })
       const len = Number(req.headers['content-length'] || 0)
       if (len > maxMb * 1024 * 1024) return send(413, { error: `Файл больше ${maxMb} МБ` })
-      const ext = (path.extname(url.searchParams.get('name') || '').toLowerCase().match(/^\.(mp4|mov|m4v|webm|mkv)$/) || ['', '.mp4'])[0] || '.mp4'
+      const ext = (path.extname(url.searchParams.get('name') || '').toLowerCase().match(/^\.(mp4|mov|m4v|webm|mkv|pdf)$/) || ['', '.mp4'])[0] || '.mp4'
       fs.mkdirSync(videoInDir, { recursive: true })
       const file = path.join(videoInDir, `in_${Date.now()}${ext}`)
       const ws = fs.createWriteStream(file)
@@ -118,7 +118,7 @@ export function startApi({ key, port, officeDir, specsDir, videoOutDir, videoInD
       ws.on('finish', () => {
         if (aborted) return
         const caption = String(url.searchParams.get('caption') || '').slice(0, 300)
-        pushFeed('user', `🎬 Видео на монтаж: ${(size / 1024 / 1024).toFixed(1)} МБ${caption ? `\n${caption}` : ''}`)
+        pushFeed('user', `${ext === '.pdf' ? '📄 PDF на разбор' : '🎬 Видео на монтаж'}: ${(size / 1024 / 1024).toFixed(1)} МБ${caption ? `\n${caption}` : ''}`)
         Promise.resolve(onVideo(file, caption)).catch(e => {
           console.error('[api] видео:', e.message)
           pushFeed('video', `Ошибка монтажа: ${e.message}`)

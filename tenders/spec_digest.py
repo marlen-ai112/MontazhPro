@@ -61,6 +61,24 @@ def _ru_start(doc):
     return 0
 
 
+def guess_product(summary, text, paras):
+    """Какой товар нужен. Для спецификаций портала: поле «Дополнительная характеристика» (там точное название),
+    иначе название лота; для других PDF: строка «Наименование товара: …» или первая значимая строка документа."""
+    extra = summary.get("extra") or ""
+    if extra:
+        m = re.search(r":\s*(.+)$", extra)
+        return _clean(m.group(1) if m else extra)
+    if summary.get("name"):
+        return _clean(summary["name"])
+    m = re.search(r"(?:наименование(?: товара)?|товар|предмет(?: закупки)?)\s*[:\-–]\s*([^\n]{4,160})", text, re.I)
+    if m:
+        return _clean(m.group(1))
+    for ln in paras:
+        if len(ln) >= 8 and not re.match(r"^(страница|стр\.|\d+\s*$)", ln, re.I):
+            return ln[:160]
+    return ""
+
+
 def digest_pdf(path):
     if fitz is None:
         return None
@@ -128,7 +146,9 @@ def digest_pdf(path):
     m = re.search(r"Описание и требуемые[^\n]*\n", text)
     if m:
         desc = _clean(text[m.end():])[:700]
-    return {"summary": summary, "params": params, "notes": notes, "desc": desc, "pages": len(doc), "ru_from_page": start + 1}
+    product = guess_product(summary, text, paras)
+    return {"summary": summary, "params": params, "notes": notes, "desc": desc, "product": product,
+            "text": re.sub(r"\n{3,}", "\n\n", text).strip()[:9000], "pages": len(doc), "ru_from_page": start + 1}
 
 
 def format_digest(d, max_params=12):
@@ -166,7 +186,11 @@ def format_digest(d, max_params=12):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Использование: python tenders/spec_digest.py spec.pdf")
+        print("Использование: python tenders/spec_digest.py spec.pdf [--lines]")
         sys.exit(1)
     res = digest_pdf(sys.argv[1])
+    if "--lines" in sys.argv:
+        # для бота: {"ok": bool, "digest": {...}, "lines": [...]}
+        print(json.dumps({"ok": bool(res), "digest": res, "lines": format_digest(res) if res else []}, ensure_ascii=False))
+        sys.exit(0 if res else 2)
     print(json.dumps(res, ensure_ascii=False, indent=1) if res else "Не удалось прочитать PDF (нужен pymupdf)")

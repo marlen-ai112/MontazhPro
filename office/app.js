@@ -23,7 +23,7 @@ const AGENTS = [
     hint: 'Ищет закупки на zakup.sk.kz: товар, запрос ценовых предложений, 1,5–5 млн тг.',
     cmds: [['Найти тендеры', '/tenders']] },
   { id: 'specs', name: 'Спецификации', color: '#a77bff', hair: '#1f1f2b', desk: 1,
-    hint: 'Читает карточку и PDF-спецификацию, определяет точный товар.',
+    hint: 'Читает карточку и PDF-спецификацию, определяет точный товар. Любой PDF можно загрузить кнопкой 📎: он скажет, какой товар нужен, какие требования, и найдёт цены.',
     cmds: [['Разобрать закупку', '/tender ']] },
   { id: 'prices', name: 'Цены и маржа', color: '#38c172', hair: '#b0561f', desk: 2,
     hint: 'Ищет цены на Satu.kz и считает маржу. Формат: /price товар | цена заказчика',
@@ -470,6 +470,7 @@ fileInp.addEventListener('change', () => {
   note.querySelector('.who').style.color = byId.video.color
   note.querySelector('.who').textContent = byId.video.name
   note.querySelector('.t').textContent = `Загружаю «${f.name}» (${(f.size / 1048576).toFixed(1)} МБ)…`
+  if (/\.pdf$/i.test(f.name)) { note.querySelector('.who').textContent = byId.specs.name; note.style.borderLeftColor = byId.specs.color; note.querySelector('.who').style.color = byId.specs.color }
   const empty = feedEl.querySelector('.empty'); if (empty) empty.remove()
   feedEl.appendChild(note); feedEl.scrollTop = feedEl.scrollHeight
   const xhr = new XMLHttpRequest()

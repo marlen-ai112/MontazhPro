@@ -610,6 +610,68 @@ function startTenderSchedule() {
   if (process.env.TENDERS_RUN_ON_START === '1') setTimeout(() => checkTenders(targets, { report: true }), 5000)
 }
 
+// ---- Разбор PDF-файла: какой товар нужен --------------------------------------------------------
+// PDF можно прислать боту в Telegram (документом, до 20 МБ) или загрузить кнопкой 📎 в AI-офисе.
+// Агент «Спецификации» читает файл: определяет товар, достаёт требования и условия (по правилам, без ИИ), ищет цены на Satu.kz.
+// Если задан ANTHROPIC_API_KEY, добавляется разбор ИИ (параметры, аналоги, что проверить, запрос для цен).
+// В подписи можно указать цену заказчика за единицу для расчёта маржи: «| 130000».
+function runDigest(file) {
+  return new Promise(resolve => {
+    const p = spawn(PYTHON, [path.join(ROOT, 'tenders', 'spec_digest.py'), file, '--lines'], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => p.kill(), 90000)
+    p.stdout.on('data', d => (out += d))
+    p.stderr.on('data', d => (err += d))
+    p.on('error', e => { clearTimeout(timer); resolve({ ok: false, error: e.message }) })
+    p.on('close', () => {
+      clearTimeout(timer)
+      try { resolve(JSON.parse(out)) } catch { resolve({ ok: false, error: err.trim().split('\n').slice(-1)[0] || 'не удалось прочитать PDF' }) }
+    })
+  })
+}
+
+async function processPdf(chatId, file, captionText, name = '') {
+  const targets = chatId === 'app' ? ['app'] : [chatId, ...(process.env.APP_KEY ? ['app'] : [])]
+  const say = async (text, agent = 'specs') => { for (const id of targets) await sendText(id, text, agent).catch(() => {}) }
+  await say('Принял PDF. Читаю…')
+  try {
+    const result = await track('specs', 'Читаю PDF-файл', runDigest(file))
+    if (!result.ok || !result.digest) return say(`Не удалось прочитать PDF: ${result.error || 'файл повреждён или это скан без текста'}. Если это скан (картинка), текст из него без распознавания не достать.`)
+    const d = result.digest
+    const s = d.summary || {}
+    const product = (d.product || '').trim()
+    const rev = Number(((captionText || '').match(/\|\s*([\d\s.,]+)/)?.[1] || '').replace(/[^\d.]/g, '')) || undefined
+    const head = [
+      `📄 Файл: ${name || path.basename(file)}${d.pages ? ` (${d.pages} стр.)` : ''}`,
+      `ТОЧНЫЙ ТОВАР: ${product || 'не удалось определить по тексту, смотрите разбор ниже'}`,
+      s.quantity ? `Количество: ${s.quantity} ${s.unit || ''}`.trim() : '',
+      s.category ? `Категория ОКТРУ: ${s.category}` : '',
+      '',
+      ...(result.lines?.length ? ['Разбор спецификации (по правилам, без ИИ):', ...result.lines] : d.text ? ['Начало текста:', d.text.slice(0, 700)] : []),
+    ].filter(x => x !== '')
+    await say(head.join('\n'))
+
+    // ИИ-разбор (если есть ключ): параметры, аналоги, проверки и запрос для поиска цен
+    let query = product
+    if (ANTHROPIC_KEY && AI_MODE !== 'off') {
+      const pseudo = { name: name || 'PDF', lots: [{ number: '1', name: product, exact_product: product ? [product] : [], quantity: s.quantity || 1, unit: s.unit, spec_text: d.text || '' }] }
+      const ai = await track('specs', 'ИИ разбирает файл', analyzeLots(pseudo))
+      if (ai?.text) await say(ai.text)
+      if (ai?.queries?.['1']) query = ai.queries['1']
+    }
+
+    // цены и маржа
+    if (query && process.env.TENDERS_PRICES !== '0') {
+      const res = await fetchPrices([query])
+      await say(res.ok ? priceBlock({ price_per_unit: rev, quantity: Number(String(s.quantity || 1).replace(',', '.')) || 1 }, res.results?.[0]) : `💰 Цены: не удалось получить (${res.error})`, 'prices')
+    }
+  } catch (e) {
+    console.error('[pdf]', e.message)
+    await say(`Не удалось разобрать PDF: ${String(e.message).slice(0, 300)}`)
+  }
+}
+
 // ---- Агент «Видеомонтаж»: рилс из присланного видео ---------------------------------------------
 // Видео можно прислать боту в Telegram (до 20 МБ) или загрузить кнопкой 📎 в приложении AI-офис (до VIDEO_MAX_MB, 150).
 // Подпись к видео: заголовок, «стиль: кино|тёплый|чб|резкий», «без субтитров», «без нарезки».
@@ -685,11 +747,12 @@ function processVideo(chatId, file, captionText) {
 
 // Видео из Telegram: скачиваем (лимит Bot API 20 МБ) и отдаём на монтаж.
 async function handleTelegramVideo(chatId, msg) {
-  const media = msg.video || msg.video_note || (msg.document?.mime_type?.startsWith('video/') ? msg.document : null)
+  const isPdf = Boolean(msg.document && (msg.document.mime_type === 'application/pdf' || /\.pdf$/i.test(msg.document.file_name || '')))
+  const media = isPdf ? msg.document : msg.video || msg.video_note || (msg.document?.mime_type?.startsWith('video/') ? msg.document : null)
   if (!media) return false
   const sizeMb = (media.file_size || 0) / 1024 / 1024
   if (sizeMb > 20) {
-    await sendText(chatId, `Видео ${sizeMb.toFixed(0)} МБ: Telegram не даёт боту скачивать файлы больше 20 МБ. Загрузите его в приложении AI-офис кнопкой 📎 (до ${process.env.VIDEO_MAX_MB || 150} МБ).`, 'video')
+    await sendText(chatId, `Файл ${sizeMb.toFixed(0)} МБ: Telegram не даёт боту скачивать файлы больше 20 МБ. Загрузите его в приложении AI-офис кнопкой 📎 (до ${process.env.VIDEO_MAX_MB || 150} МБ).`, isPdf ? 'specs' : 'video')
     return true
   }
   try {
@@ -697,10 +760,11 @@ async function handleTelegramVideo(chatId, msg) {
     const res = await fetch(`${TG_BASE}/file/bot${TG_TOKEN}/${f.file_path}`)
     if (!res.ok) throw new Error(`скачивание: HTTP ${res.status}`)
     fs.mkdirSync(VIDEO_IN, { recursive: true })
-    const ext = path.extname(f.file_path) || '.mp4'
+    const ext = isPdf ? '.pdf' : path.extname(f.file_path) || '.mp4'
     const file = path.join(VIDEO_IN, `in_${Date.now()}${ext}`)
     fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()))
-    processVideo(chatId, file, msg.caption || '').catch(e => console.error('[video]', e.message))
+    if (isPdf) processPdf(chatId, file, msg.caption || '', msg.document.file_name || '').catch(e => console.error('[pdf]', e.message))
+    else processVideo(chatId, file, msg.caption || '').catch(e => console.error('[video]', e.message))
   } catch (e) {
     await sendText(chatId, `Не удалось получить видео: ${e.message}`, 'video')
   }
@@ -828,6 +892,7 @@ const HELP = `Команды:
 /tender 1275177 — точный товар, спецификация, цены и маржа по закупке
 /price насос ручной гидравлический 2л | 130000 — цены на товар; после «|» цена заказчика за единицу для расчёта маржи
 /explore https://сайт — изучить страницу нового источника закупок (служебная)
+PDF: пришлите PDF боту (документом) или загрузите кнопкой 📎: бот определит, какой товар нужен, достанет требования и найдёт цены. В подписи можно «| цена заказчика».
 Видео: пришлите видео боту (до 20 МБ) или загрузите кнопкой 📎 в AI-офисе. В подписи: заголовок, «стиль: кино|тёплый|чб|резкий», «без субтитров», «без нарезки». Бот вернёт рилс 9:16: паузы вырезаны, резкая цветокоррекция, заголовок.
 /reset — очистить историю чата с ИИ
 Можно писать и словами: «тендеры», «тендер 1275177», «цены кабель ВВГ».`
@@ -919,7 +984,7 @@ async function main() {
       videoOutDir: VIDEO_OUT,
       videoInDir: VIDEO_IN,
       onCommand: t => handleMessage('app', t),
-      onVideo: (file, caption) => processVideo('app', file, caption),
+      onVideo: (file, caption) => (/\.pdf$/i.test(file) ? processPdf('app', file, caption) : processVideo('app', file, caption)),
     })
   } else {
     console.log('[api] приложение AI-офис выключено (не задан APP_KEY)')
